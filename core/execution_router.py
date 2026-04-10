@@ -302,6 +302,16 @@ def execution_router_process(
                                 seen_deal_tickets.add(deal.ticket)
                                 kelly.record(deal.profit)
                                 active_symbols.discard(deal.symbol)
+                                
+                                try:
+                                    io_queue.put_nowait({
+                                        "action": "update_pnl",
+                                        "ticket": deal.position_id,
+                                        "pnl":    deal.profit
+                                    })
+                                except Exception:
+                                    pass
+
                                 logger.info(
                                     f"[KELLY] Closed deal #{deal.ticket} | "
                                     f"{deal.symbol} | PnL={deal.profit:+.2f} | "

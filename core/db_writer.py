@@ -95,47 +95,72 @@ def db_writer_daemon(io_queue: MpQueue, stop_event) -> None:
     BATCH_SIZE    = 10      # flush in micro-batches
     FLUSH_TIMEOUT = 2.0     # seconds — flush even if batch not full
 
-    pending: list[dict] = []
+    pending_inserts: list[dict] = []
+    pending_updates: list[dict] = []
     last_flush = time.monotonic()
 
     while not stop_event.is_set():
         try:
             item = io_queue.get(timeout=0.5)
-            pending.append(item)
+            if item.get("action") == "update_pnl":
+                pending_updates.append(item)
+            else:
+                pending_inserts.append(item)
         except Exception:
             pass   # queue.Empty or mp.Queue timeout — normal
 
         now = time.monotonic()
         should_flush = (
-            len(pending) >= BATCH_SIZE or
-            (pending and (now - last_flush) >= FLUSH_TIMEOUT)
+            (len(pending_inserts) + len(pending_updates)) >= BATCH_SIZE or
+            ((pending_inserts or pending_updates) and (now - last_flush) >= FLUSH_TIMEOUT)
         )
 
-        if should_flush and pending:
-            try:
-                conn.executemany("""
-                    INSERT INTO trades
-                        (timestamp, symbol, direction, lot, price, ticket,
-                         tp, sl, kelly, hurst, pnl)
-                    VALUES
-                        (:timestamp, :symbol, :direction, :lot, :price, :ticket,
-                         :tp, :sl, :kelly, :hurst, NULL)
-                """, pending)
-                conn.commit()
-                logger.info(f"DB Writer: flushed {len(pending)} trade records.")
-                pending.clear()
-                last_flush = now
-            except Exception as exc:
-                logger.error(f"DB Writer: INSERT failed — {exc}", exc_info=True)
+        if should_flush:
+            # 1. Flush Inserts
+            if pending_inserts:
+                try:
+                    conn.executemany("""
+                        INSERT INTO trades
+                            (timestamp, symbol, direction, lot, price, ticket,
+                             tp, sl, kelly, hurst, pnl)
+                        VALUES
+                            (:timestamp, :symbol, :direction, :lot, :price, :ticket,
+                             :tp, :sl, :kelly, :hurst, NULL)
+                    """, pending_inserts)
+                    conn.commit()
+                    logger.info(f"DB Writer: flushed {len(pending_inserts)} trade records.")
+                    pending_inserts.clear()
+                except Exception as exc:
+                    logger.error(f"DB Writer: INSERT failed — {exc}", exc_info=True)
+
+            # 2. Flush Updates
+            if pending_updates:
+                try:
+                    conn.executemany("""
+                        UPDATE trades 
+                        SET pnl = :pnl 
+                        WHERE ticket = :ticket
+                    """, pending_updates)
+                    conn.commit()
+                    logger.info(f"DB Writer: updated PNL for {len(pending_updates)} records.")
+                    pending_updates.clear()
+                except Exception as exc:
+                    logger.error(f"DB Writer: UPDATE failed — {exc}", exc_info=True)
+                    
+            last_flush = now
 
     # ── Drain remaining on shutdown ───────────────────────────────────────────
     while not io_queue.empty():
         try:
-            pending.append(io_queue.get_nowait())
+            item = io_queue.get_nowait()
+            if item.get("action") == "update_pnl":
+                pending_updates.append(item)
+            else:
+                pending_inserts.append(item)
         except Exception:
             break
 
-    if pending:
+    if pending_inserts:
         try:
             conn.executemany("""
                 INSERT INTO trades
@@ -144,11 +169,23 @@ def db_writer_daemon(io_queue: MpQueue, stop_event) -> None:
                 VALUES
                     (:timestamp, :symbol, :direction, :lot, :price, :ticket,
                      :tp, :sl, :kelly, :hurst, NULL)
-            """, pending)
+            """, pending_inserts)
             conn.commit()
-            logger.info(f"DB Writer: shutdown flush {len(pending)} records.")
+            logger.info(f"DB Writer: shutdown flush {len(pending_inserts)} records.")
         except Exception as exc:
             logger.error(f"DB Writer: shutdown flush failed — {exc}")
+
+    if pending_updates:
+        try:
+            conn.executemany("""
+                UPDATE trades 
+                SET pnl = :pnl 
+                WHERE ticket = :ticket
+            """, pending_updates)
+            conn.commit()
+            logger.info(f"DB Writer: shutdown update {len(pending_updates)} records.")
+        except Exception as exc:
+            logger.error(f"DB Writer: shutdown update failed — {exc}")
 
     conn.close()
     logger.info("DB Writer daemon exited.")
