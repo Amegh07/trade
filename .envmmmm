@@ -1,0 +1,9 @@
+# MetaTrader 5 Credentials
+MT5_ACCOUNT=12345678
+MT5_PASSWORD=your_password_here
+MT5_SERVER=your_broker_server
+
+# Risk Parameters
+MAX_RISK_PER_TRADE=0.02
+MAX_DAILY_LOSS=0.05
+ACCOUNT_BALANCE=10000.0
