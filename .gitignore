@@ -1,0 +1,25 @@
+# Virtual Environments
+venv/
+env/
+__pycache__/
+*.pyc
+
+# IDEs
+.vscode/
+
+# Logs and Databases
+logs/
+*.log
+*.db
+*.sqlite3
+optimized_params.db
+
+# Environment variables
+.env
+.envmmmm
+
+# Scratch & Temporary
+scratch/
+simulator/
+diagnostic.html
+index.html
