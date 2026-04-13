@@ -5,3 +5,7 @@ python-dotenv
 
 # asyncio is part of the Python standard library (>= 3.4) — no pip install needed
 asyncio
+fastapi
+uvicorn
+websockets
+aiofiles

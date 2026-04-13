@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Omega Execution Dashboard</title>
+    <!-- Lightweight Charts Script -->
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        :root {
+            --bg-color: #0b0c10;
+            --panel-bg: #111217;
+            --border-color: #1f2329;
+            --text-color: #c5c6c7;
+            --accent-green: #00e676;
+            --accent-red: #ff1744;
+            --accent-blue: #45a29e;
+            --font-main: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            --font-mono: 'Consolas', 'Courier New', Courier, monospace;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-main);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Top Bar - Metrics Ribbon */
+        #metrics-ribbon {
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            background-color: var(--panel-bg);
+            border-bottom: 1px solid var(--border-color);
+            flex-shrink: 0;
+        }
+
+        .sys-title {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: var(--accent-blue);
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .metrics-container {
+            display: flex;
+            gap: 30px;
+        }
+
+        .metric {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+        }
+
+        .metric-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            color: #7a7e85;
+            letter-spacing: 1px;
+        }
+
+        .metric-value {
+            font-size: 1.2rem;
+            font-weight: bold;
+            font-family: var(--font-mono);
+        }
+        
+        .val-good { color: var(--accent-green); }
+        .val-bad { color: var(--accent-red); }
+
+        /* Chart Canvas (Top 60%) */
+        #chart-container {
+            flex-grow: 1;
+            height: calc(60vh - 60px);
+            width: 100%;
+            border-bottom: 2px solid var(--border-color);
+            background-color: var(--bg-color);
+        }
+
+        /* Live Log Console (Bottom 40%) */
+        #console-container {
+            height: 40vh;
+            background-color: #050608;
+            padding: 10px 15px;
+            overflow-y: auto;
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            color: #9aa0a6;
+            line-height: 1.4;
+        }
+
+        .log-line {
+            margin-bottom: 2px;
+            word-wrap: break-word;
+        }
+
+        .log-timestamp {
+            color: #555;
+            margin-right: 10px;
+        }
+
+        .log-info { color: #8ab4f8; }
+        .log-warn { color: #f29900; }
+        .log-error { color: #e11d48; }
+        .log-trade { color: var(--accent-green); font-weight: bold; }
+        .log-alert { color: var(--accent-red); }
+
+        /* Custom Scrollbar for Terminal */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-color); }
+        ::-webkit-scrollbar-thumb { background: #2a2e35; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #3a3f47; }
+    </style>
+</head>
+<body>
+
+    <!-- Metrics Ribbon -->
+    <div id="metrics-ribbon">
+        <div class="sys-title">Ω OMEGA TERMINAL</div>
+        <div class="metrics-container">
+            <div class="metric">
+                <span class="metric-label">Current Equity</span>
+                <span class="metric-value val-good" id="val-equity">$---</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Total Trades</span>
+                <span class="metric-value" id="val-trades">--</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Win Rate</span>
+                <span class="metric-value" id="val-winrate">--%</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">Drawdown</span>
+                <span class="metric-value val-bad" id="val-drawdown">--%</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chart -->
+    <div id="chart-container"></div>
+
+    <!-- Live Console -->
+    <div id="console-container" id="terminal"></div>
+
+    <script>
+        // DOM Elements
+        const eqEl = document.getElementById('val-equity');
+        const trEl = document.getElementById('val-trades');
+        const wrEl = document.getElementById('val-winrate');
+        const ddEl = document.getElementById('val-drawdown');
+        const terminal = document.getElementById('console-container');
+
+        // Formatter
+        const fm = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+
+        // Initialize Lightweight Charts
+        const chart = LightweightCharts.createChart(document.getElementById('chart-container'), {
+            layout: {
+                background: { type: 'solid', color: '#0b0c10' },
+                textColor: '#c5c6c7',
+            },
+            grid: {
+                vertLines: { color: 'rgba(255, 255, 255, 0.05)' },
+                horzLines: { color: 'rgba(255, 255, 255, 0.05)' },
+            },
+            crosshair: {
+                mode: LightweightCharts.CrosshairMode.Normal,
+            },
+            rightPriceScale: {
+                borderColor: '#1f2329',
+                autoScale: true,
+            },
+            timeScale: {
+                borderColor: '#1f2329',
+                timeVisible: true,
+                secondsVisible: false,
+            },
+        });
+
+        // Area Series for Equity
+        const areaSeries = chart.addAreaSeries({
+            lineColor: '#00e676',
+            topColor: 'rgba(0, 230, 118, 0.4)',
+            bottomColor: 'rgba(0, 230, 118, 0.0)',
+            lineWidth: 2,
+            priceFormat: {
+                type: 'price',
+                precision: 2,
+                minMove: 0.01,
+            },
+        });
+
+        // Resize handler
+        window.addEventListener('resize', () => {
+            const container = document.getElementById('chart-container');
+            chart.resize(container.clientWidth, container.clientHeight);
+        });
+
+        // Fetch Data Pipeline
+        async function updateDashboard() {
+            try {
+                // Fetch Stats
+                const statsResponse = await fetch('/api/stats');
+                const stats = await statsResponse.json();
+
+                // Update DOM
+                eqEl.textContent = fm.format(stats.current_equity);
+                trEl.textContent = stats.total_trades;
+                wrEl.textContent = `${stats.win_rate}%`;
+                ddEl.textContent = `${stats.drawdown}%`;
+
+                // Update colors dynamically
+                eqEl.className = stats.current_equity >= 100000 ? 'metric-value val-good' : 'metric-value val-bad';
+
+                // Fetch Chart Data
+                const eqResponse = await fetch('/api/equity');
+                const equityData = await eqResponse.json();
+                
+                // If there's valid data, set it to chart
+                if (equityData && equityData.length > 0) {
+                    areaSeries.setData(equityData);
+                    chart.timeScale().fitContent();
+                }
+
+            } catch (err) {
+                console.error("Dashboard Sync Error:", err);
+            }
+        }
+
+        // Run immediately and then loop every 5s
+        updateDashboard();
+        setInterval(updateDashboard, 5000);
+
+        // System Log Web Socket
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/logs`;
+            const ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                appendLog("SYSTEM", "WebSocket Telemetry Protocol Established.", "log-info");
+            };
+
+            ws.onmessage = (event) => {
+                const line = event.data;
+                appendRawLog(line);
+            };
+
+            ws.onerror = (error) => {
+                console.error("WebSocket Error:", error);
+            };
+
+            ws.onclose = () => {
+                appendLog("SYSTEM", "Connection lost. Reconnecting in 3s...", "log-error");
+                setTimeout(connectWebSocket, 3000);
+            };
+        }
+
+        function appendRawLog(line) {
+            // Very simple color parser based on log context
+            let levelClass = "log-info";
+            if (line.includes("ERROR") || line.includes("CRITICAL") || line.includes("failed")) levelClass = "log-error";
+            if (line.includes("WARN")) levelClass = "log-warn";
+            if (line.includes("ORDER") || line.includes("DEAL") || line.includes("Iceberg")) levelClass = "log-trade";
+            if (line.includes("choked") || line.includes("skipped") || line.includes("Block")) levelClass = "log-alert";
+
+            const p = document.createElement("div");
+            p.className = `log-line ${levelClass}`;
+            p.textContent = line;
+            terminal.appendChild(p);
+
+            // Auto-scroll
+            terminal.scrollTop = terminal.scrollHeight;
+            
+            // Limit DOM nodes to prevent memory leak (keep last 300 lines)
+            if (terminal.childElementCount > 300) {
+                terminal.removeChild(terminal.firstChild);
+            }
+        }
+
+        function appendLog(level, msg, cssClass) {
+            const p = document.createElement("div");
+            p.className = `log-line ${cssClass}`;
+            p.innerHTML = `[${level}] ${msg}`;
+            terminal.appendChild(p);
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+
+        // Init connection
+        connectWebSocket();
+    </script>
+</body>
+</html>

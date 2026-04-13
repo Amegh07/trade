@@ -33,7 +33,7 @@ def run_shadow_optimizer(live_params: mp.Array, stop_event: mp.Event):
             logger.info("[SHADOW AI] Waking up. Starting Optuna optimization study...")
             
             # Connect to logs/trades.db
-            conn = sqlite3.connect("logs/trades.db", uri=True, flags=sqlite3.SQLITE_OPEN_READONLY)
+            conn = sqlite3.connect('file:logs/trades.db?mode=ro', uri=True)
             
             # Fetch past 48 hours of trade outcomes for optimization
             now = time.time()
