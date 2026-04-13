@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phase 6: Shadow Optimizer Simulator</title>
+    <link rel="stylesheet" href="shadow.css">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="particle-domain"></div>
+    <div class="glass-container shadow-mode">
+        <header>
+            <h1>Phase 6: <span>Shadow Optimizer</span></h1>
+            <p>Live Continuous Online Learning vs Shifting Market Regimes</p>
+        </header>
+
+        <main class="grid-layout">
+            <!-- Sidebar -->
+            <aside class="controls-panel">
+                <div class="control-group">
+                    <label>Shadow Optimizer (AI)</label>
+                    <label class="switch">
+                        <input type="checkbox" id="aiToggle" checked>
+                        <span class="slider round"></span>
+                    </label>
+                    <span id="aiStatusText" class="status-on">ONLINE</span>
+                </div>
+
+                <div class="control-group">
+                    <label for="marketVol">Market Volatility</label>
+                    <input type="range" id="marketVol" min="1" max="10" step="1" value="5">
+                </div>
+                
+                <div class="control-group">
+                    <label for="regimeFreq">Regime Shift Frequency</label>
+                    <input type="range" id="regimeFreq" min="1" max="10" step="1" value="3">
+                </div>
+
+                <div class="epoch-container" id="epochContainer" style="opacity: 0;">
+                    <p class="epoch-title">Bayesian Optimization</p>
+                    <div class="progress-bar-wrapper">
+                        <div class="progress-bar" id="epochProgress"></div>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Chart -->
+            <section class="chart-panel">
+                <!-- Legend for regimes -->
+                <div class="regime-legend">
+                    <span class="dot trending"></span> Trending
+                    <span class="dot choppy"></span> Choppy
+                    <span class="dot volatile"></span> Volatile
+                </div>
+                <div class="chart-wrapper">
+                    <canvas id="liveChart"></canvas>
+                </div>
+            </section>
+        </main>
+
+        <!-- Dashboard -->
+        <section class="dashboard">
+            <div class="metric-card bg-highlight">
+                <h3>Current Equity</h3>
+                <p id="statEquity" class="highlight">$100,000.00</p>
+            </div>
+            <div class="metric-card pulse-card" id="regimeCard">
+                <h3>Active Regime</h3>
+                <p id="statRegime">TRENDING</p>
+            </div>
+            <div class="metric-card">
+                <h3>Current Hurst</h3>
+                <p id="statHurst">0.65</p>
+            </div>
+            <div class="metric-card">
+                <h3>Current ATR</h3>
+                <p id="statAtr">0.25</p>
+            </div>
+        </section>
+    </div>
+
+    <script src="shadow.js"></script>
+</body>
+</html>

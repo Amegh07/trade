@@ -288,6 +288,18 @@ class LiveOrderRouter:
             mid_price = (tick.ask + tick.bid) / 2.0
             price = tick.ask if is_buy else tick.bid
             
+            # ── Smart Order Routing (SOR): Limit Sweeping Slices ──
+            # Only slice if volume >= 4 * volume_min to allow fractional splits safely
+            do_sweep = (volume >= (info.volume_min * 4) and volume >= 0.04)
+            if do_sweep:
+                v_m  = round(volume * 0.25, 2)
+                v_l1 = round(volume * 0.25, 2)
+                v_l2 = round(volume - v_m - v_l1, 2)
+            else:
+                v_m  = volume
+                v_l1 = 0.0
+                v_l2 = 0.0
+            
             # Compute dynamic SL based on live execution price boundaries
             sl_price = sl_target
             tp_price = tp_target
@@ -302,24 +314,24 @@ class LiveOrderRouter:
             sl_price = round(sl_price, digits)
             tp_price = round(tp_price, digits)
 
-            request = {
+            request_market = {
                 "action":       mt5.TRADE_ACTION_DEAL,
                 "symbol":       symbol,
-                "volume":       float(volume),
+                "volume":       float(v_m),
                 "type":         order_type,
                 "price":        float(price),
                 "sl":           float(sl_price),
                 "tp":           float(tp_price),
                 "deviation":    20,
                 "magic":        200000,
-                "comment":      "algo_market",
+                "comment":      "sor_market",
                 "type_time":    mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_FOK,
             }
 
-            logger.info(f"[{symbol}] ⚡ MARKET {order_type} ORDER | {volume} lots at {price:.{digits}f}")
+            logger.info(f"[{symbol}] ⚡ MARKET {order_type} ORDER | {v_m} lots at {price:.{digits}f}")
 
-            result = mt5.order_send(request)
+            result = mt5.order_send(request_market)
 
             if result is None:
                 logger.error(f"order_send unconditionally failed: {mt5.last_error()}")
@@ -329,6 +341,45 @@ class LiveOrderRouter:
                 # Execution confirmed! Calculate slippage dynamically.
                 slippage_points = abs(result.price - mid_price) / point
                 logger.info(f"Market deal executed! Deal ticket: {result.deal} | Slippage: {slippage_points:.1f} pts")
+                
+                # ── Synthetic Iceberg Limit Sweeping ───────────────────────────
+                if do_sweep and v_l1 > 0:
+                    # 1 pip = 10 points
+                    pip_pts = 10 * point
+                    
+                    if is_buy:
+                        limit_type = mt5.ORDER_TYPE_BUY_LIMIT
+                        p1 = tick.bid - (pip_pts * 0.5)
+                        p2 = tick.bid - (pip_pts * 1.5)
+                    else:
+                        limit_type = mt5.ORDER_TYPE_SELL_LIMIT
+                        p1 = tick.ask + (pip_pts * 0.5)
+                        p2 = tick.ask + (pip_pts * 1.5)
+                    
+                    req_l1 = request_market.copy()
+                    req_l1.update({
+                        "action": mt5.TRADE_ACTION_PENDING,
+                        "type": limit_type,
+                        "volume": float(v_l1),
+                        "price": round(p1, digits),
+                        "comment": "sor_limit_0.5",
+                        "type_time": mt5.ORDER_TIME_GTC,
+                    })
+                    
+                    req_l2 = req_l1.copy()
+                    req_l2.update({
+                        "volume": float(v_l2),
+                        "price": round(p2, digits),
+                        "comment": "sor_limit_1.5",
+                    })
+
+                    res_l1 = mt5.order_send(req_l1)
+                    res_l2 = mt5.order_send(req_l2)
+                    
+                    log_p1 = req_l1['price']
+                    log_p2 = req_l2['price']
+                    logger.info(f"[{symbol}] 🧊 SOR Iceberg Deployed: L1 ({v_l1} @ {log_p1:.{digits}f}), L2 ({v_l2} @ {log_p2:.{digits}f})")
+
                 return result, slippage_points
 
             if result.retcode in RETRYABLE and attempt < max_retries:
