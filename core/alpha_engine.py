@@ -177,10 +177,10 @@ def _vectorized_zscore(series: np.ndarray, period: int = ZSCORE_PERIOD) -> float
     return float((series[-1] - mu) / sigma)
 
 
-def _regime_from_hurst(h: float) -> str:
-    if h > 0.55:
+def _regime_from_hurst(h: float, hurst_threshold: float) -> str:
+    if h > hurst_threshold:
         return "TRENDING"
-    elif h < 0.45:
+    elif h < (hurst_threshold - 0.10):
         return "RANGING"
     return "NO_TRADE"
 
@@ -239,6 +239,7 @@ def alpha_engine_process(
     mt5_password: str,
     mt5_server:   str,
     feeder_ready: mp.Event,
+    live_params:  mp.Array,
 ):
     """
     Alpha Engine entry point.
@@ -393,10 +394,18 @@ def alpha_engine_process(
                 if len(c) < CANDLE_SEED_MINIMUM:
                     continue
 
+                # ── Dynamic DNA Core Check ────────────────────────────────────
+                current_hurst_req = live_params[0]
+                current_atr_mult  = live_params[1]
+
                 # ── Phase 2: Vectorised mathematics ──────────────────────────
                 hurst  = _vectorized_hurst(c)
-                regime = _regime_from_hurst(hurst)
-                atr    = _vectorized_atr(h, l, c)
+                regime = _regime_from_hurst(hurst, current_hurst_req)
+                
+                # The raw ATR value scaled by the optimizer's multiplier
+                raw_atr = _vectorized_atr(h, l, c)
+                atr     = raw_atr * current_atr_mult if current_atr_mult > 0 else raw_atr
+                
                 zscore = _vectorized_zscore(c)
 
                 # ── Direction logic per regime ────────────────────────────────

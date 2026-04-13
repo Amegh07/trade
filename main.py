@@ -30,6 +30,8 @@ from core.data_feeder      import data_feeder_process,     FIELDS_PER_SYMBOL, BY
 from core.alpha_engine     import alpha_engine_process
 from core.execution_router import execution_router_process
 from core.db_writer        import db_writer_daemon
+from core.shadow_optimizer import run_shadow_optimizer
+import ctypes
 
 logger = setup_logger("main")
 
@@ -102,6 +104,11 @@ def supervisor_main() -> None:
     signal_queue = mp.Queue(maxsize=1000)   # AlphaEngine → ExecRouter
     io_queue     = mp.Queue(maxsize=5000)   # ExecRouter  → DB Writer
 
+    # ── Live Parameters (Shadow Optimizer → Alpha Engine) ──────────────────────
+    # Array of 2 doubles: [0] = Hurst Threshold, [1] = ATR Multiplier
+    # Default seeds: Hurst > 0.60, ATR = 0.25
+    live_params = mp.Array(ctypes.c_double, [0.60, 0.25]) 
+
     # ── Process instantiation ─────────────────────────────────────────────────
     p_feeder = mp.Process(
         target = data_feeder_process,
@@ -124,7 +131,15 @@ def supervisor_main() -> None:
             signal_queue, stop_event,
             MT5_ACCOUNT, MT5_PASSWORD, MT5_SERVER,
             feeder_ready,
+            live_params,
         ),
+    )
+
+    p_shadow = mp.Process(
+        target = run_shadow_optimizer,
+        name   = "ShadowOptimizer",
+        daemon = True,
+        args   = (live_params, stop_event),
     )
 
     p_router = mp.Process(
@@ -167,6 +182,10 @@ def supervisor_main() -> None:
     p_router.start()
     logger.info(f"[PHASE 4/5] ExecRouter PID={p_router.pid} ✓")
 
+    logger.info("[SHADOW] Starting ShadowOptimizer process…")
+    p_shadow.start()
+    logger.info(f"[SHADOW] ShadowOptimizer PID={p_shadow.pid} ✓")
+
     logger.info("[PHASE 5] IO Queue initialized for ExecRouter DB writes.")
 
     logger.info("═" * 66)
@@ -175,9 +194,10 @@ def supervisor_main() -> None:
 
     # ── Supervisor health loop ─────────────────────────────────────────────────
     procs = [
-        ("DataFeeder",  p_feeder),
-        ("AlphaEngine", p_alpha),
-        ("ExecRouter",  p_router),
+        ("DataFeeder",      p_feeder),
+        ("AlphaEngine",     p_alpha),
+        ("ExecRouter",      p_router),
+        ("ShadowOptimizer", p_shadow),
     ]
 
     try:
