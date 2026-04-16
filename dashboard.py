@@ -15,11 +15,14 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
-)
+TRADES_DB = os.getenv("OMEGA_DB_PATH", "logs/trades.db")
+CONTROL_DB = os.getenv("OMEGA_CONTROL_DB_PATH", "logs/control.db")
 
-def query_db(query, params=()):
+def query_db(query, params=(), db_path=None):
+    if db_path is None:
+        db_path = TRADES_DB
     try:
-        conn = sqlite3.connect('file:logs/trades.db?mode=ro', uri=True)
+        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(query, params)
@@ -100,7 +103,7 @@ def get_risk():
     open_trades = query_db("SELECT sum(lot) as total_lot FROM trades WHERE pnl IS NULL")
     exposure = open_trades[0]['total_lot'] if open_trades and open_trades[0]['total_lot'] else 0.0
     
-    state = query_db("SELECT value FROM control_state WHERE key='correlation_penalty'")
+    state = query_db("SELECT value FROM control_state WHERE key='correlation_penalty'", db_path=CONTROL_DB)
     penalty = float(state[0]['value']) if state else 0.85 
     
     return {
@@ -118,7 +121,7 @@ class OverrideCommand(BaseModel):
 @app.post("/api/control/override")
 def control_override(cmd: OverrideCommand):
     try:
-        conn = sqlite3.connect('logs/trades.db', timeout=5.0)
+        conn = sqlite3.connect(CONTROL_DB, timeout=5.0)
         cur = conn.cursor()
         cur.execute("CREATE TABLE IF NOT EXISTS control_state (key TEXT PRIMARY KEY, value TEXT)")
         cur.execute("REPLACE INTO control_state (key, value) VALUES (?, ?)", ("manual_override", str(cmd.manual_override)))
@@ -148,7 +151,7 @@ def get_stats():
 @app.post("/api/control/kill")
 def emergency_kill():
     try:
-        conn = sqlite3.connect('logs/trades.db', timeout=5.0)
+        conn = sqlite3.connect(CONTROL_DB, timeout=5.0)
         cur = conn.cursor()
         cur.execute("CREATE TABLE IF NOT EXISTS control_state (key TEXT PRIMARY KEY, value TEXT)")
         cur.execute("REPLACE INTO control_state (key, value) VALUES (?, ?)", ("EMERGENCY_STOP", "True"))

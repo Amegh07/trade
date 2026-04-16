@@ -8,13 +8,15 @@ import time
 import logging
 import sqlite3
 import uuid
+import queue
 import multiprocessing as mp
 import numpy as np
 import statsmodels.api as sm
 import pandas as pd
-from statsmodels.tsa.stattools import coint
-from collections import deque
+import statsmodels.tsa.stattools as ts
 from multiprocessing.shared_memory import SharedMemory
+import datetime
+import collections
 from typing import NamedTuple, Dict, List, Tuple
 
 from core.data_feeder import FIELDS_PER_SYMBOL, BYTES_PER_SYMBOL
@@ -183,6 +185,7 @@ def alpha_engine_process(
     mt5_server:   str,
     feeder_ready: mp.Event,
     live_params:  mp.Array,
+    shm_lock     = None,
 ):
     import MetaTrader5 as mt5
 
@@ -209,7 +212,8 @@ def alpha_engine_process(
     times      = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
     buf_ptr    = {s: 0     for s in symbols}  
     buf_count  = {s: 0     for s in symbols}  
-    candle_ts  = {s: 0.0   for s in symbols}  
+    candle_ts  = {s: 0.0   for s in symbols}
+    spread_history  = {s: collections.deque(maxlen=20) for s in symbols}  
 
     logger.info("Seeding candle buffers for pairs...")
     for sym in symbols:
@@ -237,8 +241,12 @@ def alpha_engine_process(
                 b_id = pos.comment if pos.comment.startswith("BSKT_") else None
                 if b_id:
                     if b_id not in active_baskets:
+                        pos_dt = datetime.datetime.fromtimestamp(pos.time, tz=datetime.timezone.utc)
+                        now_dt = datetime.datetime.now(tz=datetime.timezone.utc)
+                        age_seconds = (now_dt - pos_dt).total_seconds()
+                        
                         active_baskets[b_id] = {
-                            "start_time": pos.time, # epoch seconds
+                            "start_time": time.time() - age_seconds,  # Normalize to local epoch
                             "symbols": set()
                         }
                     active_baskets[b_id]["symbols"].add(pos.symbol)
@@ -260,20 +268,15 @@ def alpha_engine_process(
         for sym in symbols:
             idx = symbol_index[sym]
             
-            # ── LOCK-FREE ATOMIC READ: verify version counter ──────────────────
-            for retry_count in range(3):
-                seq_before = ticks_np[idx, 7]
+            # ── ATOMIC READ WITH SHM_LOCK ──────────────────
+            if shm_lock: shm_lock.acquire()
+            try:
                 bid = ticks_np[idx, 0]
                 ask = ticks_np[idx, 1]
                 vol = ticks_np[idx, 3]
                 tick_time = ticks_np[idx, 4]
-                seq_after = ticks_np[idx, 7]
-                
-                if seq_before == seq_after:  # Atomicity verified
-                    break
-            else:
-                # All retries exhausted, use best-effort values
-                logger.debug(f"Atomic read retried 3x for {sym}, using best-effort")
+            finally:
+                if shm_lock: shm_lock.release()
             
             if bid == 0.0: continue
             
@@ -327,9 +330,8 @@ def alpha_engine_process(
                 'x':    closes[asset_b][idx_b][start_b:]
             })
 
-            # Merge, ffill, dropna
-            df_merged = pd.merge(df_a, df_b, on='time', how='outer').sort_values('time')
-            df_merged[['y', 'x']] = df_merged[['y', 'x']].ffill()
+            # Merge inner
+            df_merged = pd.merge(df_a, df_b, on='time', how='inner').sort_values('time')
             df_merged = df_merged.dropna()
 
             y = df_merged['y'].values
@@ -436,6 +438,10 @@ def alpha_engine_process(
                         logger.info(f"[{asset_a}-{asset_b}] Pair Alert: Z={z_score:.2f} | p={p_val:.4f} | Beta={beta:.2f}")
                 except queue.Full:
                     logger.error(f"Signal queue FULL: basket {b_id} signals {asset_a}/{asset_b} dropped. ExecRouter backlog detected.")
+                    # IMPORTANT: Only pop the tracked state on queue failure if it was an ENTER action.
+                    # If.it was a CLOSE action, we WANT to retain it so AlphaEngine keeps trying to close the position.
+                    if action_a != "CLOSE":
+                        active_baskets.pop(b_id, None)
                 except Exception as exc:
                     logger.error(f"Signal queue error: {exc}")
 

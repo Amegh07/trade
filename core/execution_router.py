@@ -110,14 +110,10 @@ class KellyEngine:
         self._trades.append(float(pnl))
 
     def kelly_fraction(self) -> float:
-        """Returns Half-Kelly ∈ [MINIMUM_KELLY_FLOOR, MAX_KELLY]."""
-        # ── RISK OVERRIDE FLOOR ──
-        # Ensure the bot always takes the shot if Z-Score threshold is reached,
-        # never returning 0.0 which causes a complete execution halt.
-        MINIMUM_KELLY_FLOOR = 0.01
-
+        """Returns Half-Kelly ∈ [0.0, MAX_KELLY]."""
+        
         if len(self._trades) < 5:
-            return MINIMUM_KELLY_FLOOR
+            return 0.0
 
         arr    = np.array(self._trades, dtype=np.float64)
         wins   = arr[arr > 0]
@@ -125,7 +121,7 @@ class KellyEngine:
 
         W = len(wins) / len(arr)
         if W == 0.0 or len(losses) == 0:
-            return MINIMUM_KELLY_FLOOR   # all losses or no data → floor risk
+            return 0.0   # all losses or no data → ghost mode
 
         avg_win  = wins.mean()
         avg_loss = np.abs(losses.mean())
@@ -137,10 +133,10 @@ class KellyEngine:
         K = W - ((1.0 - W) / R)
 
         if K <= 0.0:
-            return MINIMUM_KELLY_FLOOR
+            return 0.0
 
         k_half = K / 2.0
-        final_k_half = max(min(k_half, self.MAX_KELLY), MINIMUM_KELLY_FLOOR)
+        final_k_half = max(min(k_half, self.MAX_KELLY), 0.0)
         return float(final_k_half)
 
     def lot_size(
@@ -334,7 +330,8 @@ def execution_router_process(
     def _read_control_state() -> dict:
         """Reads the unified control state from SQLite with strict timeout."""
         try:
-            conn = sqlite3.connect("file:logs/trades.db?mode=ro", uri=True, timeout=0.5)
+            db_path = os.getenv("OMEGA_CONTROL_DB_PATH", "logs/control.db")
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.5)
             cur = conn.cursor()
             cur.execute("SELECT key, value FROM control_state")
             rows = cur.fetchall()
@@ -347,10 +344,15 @@ def execution_router_process(
             logger.debug(f"[Async DB Unblock] _read_control_state error: {exc}")
             return {}
 
-    def _read_override() -> tuple:
-        """Safely queries SQLite for manual override and ghost mode flags with strict timeout."""
+    def _read_override() -> tuple[bool, bool]:
+        """
+        Non-blocking short read to get manual_override and ghost_mode
+        from control.db. Returns (False, False) on timeout.
+        """
         try:
-            conn = sqlite3.connect("file:logs/trades.db?mode=ro", uri=True, timeout=0.5)
+            db_path = os.getenv("OMEGA_CONTROL_DB_PATH", "logs/control.db")
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.5)
+            conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("SELECT key, value FROM control_state WHERE key IN ('COMMANDER_OVERRIDE', 'GHOST_MODE')")
             rows = dict(cur.fetchall())
@@ -395,6 +397,11 @@ def execution_router_process(
                     logger.critical("🛑 EMERGENCY STOP DETECTED IN CONTROL_STATE. SHUTTING DOWN ROUTER.")
                     stop_event.set()
                     break
+
+                # ── Add TTL cleanup for basket_tracking ──
+                expired = [b_id for b_id, meta in basket_tracking.items() if now - meta.get("timestamp", now) > 300]
+                for b_id in expired:
+                    del basket_tracking[b_id]
 
             # Non-blocking dequeue — yield immediately if nothing to process
             try:
@@ -882,10 +889,15 @@ def execution_router_process(
 
                         # ATOMIC TRACKING: Store Primary leg for rollback if needed
                         if basket_id and leg_role == "PRIMARY":
+                            # Pull active positions to get actual position ticket instead of deal
+                            positions = await loop.run_in_executor(None, mt5.positions_get, sym)
+                            pos_ticket = positions[-1].ticket if positions else result.order
+                            
                             basket_tracking[basket_id] = {
                                 "symbol": sym,
                                 "lot":    lot,
-                                "ticket": result.deal
+                                "ticket": pos_ticket,
+                                "timestamp": time.time()
                             }
                         elif basket_id and leg_role == "HEDGE":
                             if basket_id in basket_tracking:

@@ -184,7 +184,19 @@ def db_writer_daemon(io_queue: MpQueue, stop_event) -> None:
                     
                     reason = "volume" if trades_since_maintenance >= MAINTENANCE_THRESHOLD_TRADES else "time (30 days)"
                     logger.info(f"Triggering scheduled DB maintenance (Reason: {reason}).")
-                    _defragment_db(conn, logger)
+                    
+                    def _async_maintenance():
+                        import threading
+                        def task():
+                            try:
+                                temp_conn = sqlite3.connect(DB_PATH)
+                                _defragment_db(temp_conn, logger)
+                                temp_conn.close()
+                            except Exception as e:
+                                logger.error(f"Async maintenance failed: {e}")
+                        threading.Thread(target=task, daemon=True).start()
+                        
+                    _async_maintenance()
                     trades_since_maintenance = 0
                     last_m_dt = now_dt
 

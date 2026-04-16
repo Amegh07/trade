@@ -29,6 +29,9 @@ _console_handler.setFormatter(_formatter)
 listener = logging.handlers.QueueListener(log_queue, _file_handler, _console_handler)
 listener.start()
 
+import atexit
+atexit.register(listener.stop)
+
 def setup_logger(name="trading"):
     """
     Sets up a thread-safe professional logger funneling into a central QueueListener.

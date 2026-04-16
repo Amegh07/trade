@@ -81,6 +81,7 @@ def data_feeder_process(
     mt5_password: str,
     mt5_server:   str,
     ready_event:  mp.Event,
+    shm_lock     = None,
 ):
     """
     Entry point for the Data Feeder process.
@@ -132,15 +133,21 @@ def data_feeder_process(
             try:
                 tick = mt5.symbol_info_tick(sym)
                 if tick:
-                    buf[idx, 0] = tick.bid
-                    buf[idx, 1] = tick.ask
-                    buf[idx, 2] = tick.last
-                    buf[idx, 3] = tick.volume_real
-                    buf[idx, 4] = float(tick.time)
-                    buf[idx, 5] = float(tick.flags)
                     info = mt5.symbol_info(sym)
-                    buf[idx, 6] = float(info.spread) if info else 0.0
-                    buf[idx, 7] += 1.0   # LOCK-FREE ATOMIC: increment version counter LAST
+                    spread_val = float(info.spread) if info else 0.0
+                    
+                    if shm_lock: shm_lock.acquire()
+                    try:
+                        buf[idx, 0] = tick.bid
+                        buf[idx, 1] = tick.ask
+                        buf[idx, 2] = tick.last
+                        buf[idx, 3] = tick.volume_real
+                        buf[idx, 4] = float(tick.time)
+                        buf[idx, 5] = float(tick.flags)
+                        buf[idx, 6] = spread_val
+                        buf[idx, 7] += 1.0
+                    finally:
+                        if shm_lock: shm_lock.release()
             except Exception as exc:
                 logger.warning(f"Tick error [{sym}]: {exc}")
 

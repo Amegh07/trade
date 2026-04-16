@@ -128,6 +128,7 @@ def supervisor_main() -> None:
     # ── Inter-process primitives ───────────────────────────────────────────────
     stop_event   = mp.Event()    # broadcast stop: set() → all processes exit
     feeder_ready = mp.Event()    # set by DataFeeder after first tick snapshot
+    shm_lock     = mp.Lock()     # guards SharedMemory tick writes/reads
     signal_queue = mp.Queue(maxsize=1000)   # AlphaEngine → ExecRouter
     io_queue     = mp.Queue(maxsize=5000)   # ExecRouter  → DB Writer
 
@@ -145,7 +146,7 @@ def supervisor_main() -> None:
             active_symbols, shm_name, sym_index,
             stop_event,
             MT5_ACCOUNT, MT5_PASSWORD, MT5_SERVER,
-            feeder_ready,
+            feeder_ready, shm_lock,
         ),
     )
 
@@ -158,7 +159,7 @@ def supervisor_main() -> None:
             signal_queue, stop_event,
             MT5_ACCOUNT, MT5_PASSWORD, MT5_SERVER,
             feeder_ready,
-            live_params,
+            live_params, shm_lock,
         ),
     )
 

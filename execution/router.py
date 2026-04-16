@@ -153,7 +153,7 @@ class LiveOrderRouter:
 
         # Fix #28: Expiration Timezone Crash. Build expiration relative to the broker server clock
         # extracted from the live tick, rather than the local machine's UTC epoch which could be hours behind.
-        server_time = tick.time if tick else int(time.time())
+        server_time = max(tick.time, int(time.time())) if tick else int(time.time())
 
         # ── 7. Build request (Maker Order) ───────────────────────────────────
         request = {
@@ -431,10 +431,11 @@ class LiveOrderRouter:
         logger.info(f"[{symbol}] 🧊 Initiating Iceberg Slicing. Total={total_volume} in {len(chunks)} chunks.")
         
         order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+        local_jitter = self.iceberg_jitter
 
         for i, chunk in enumerate(chunks):
-            # Apeiron Layer: Add TCA mapped dynamic latency buffer (iceberg_jitter)
-            await asyncio.sleep(random.uniform(0.5, 1.5) + self.iceberg_jitter)
+            # Apeiron Layer: Add TCA mapped dynamic latency buffer (local_jitter)
+            await asyncio.sleep(random.uniform(0.5, 1.5) + local_jitter)
             
             tick = mt5.symbol_info_tick(symbol)
             if tick is None:

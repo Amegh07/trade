@@ -194,13 +194,8 @@ def execute_order(symbol, order_type, volume, sl=None, tp=None):
     return None
 
 async def get_order_book_micro_price(symbol: str) -> float:
-    """
-    Subscribes to Depth of Market, calculates the Volume-Weighted Micro-Price,
-    and immediately releases the book to conserve CPU and avoid throttling.
-    Formula: P_micro = ((P_ask * V_bid) + (P_bid * V_ask)) / (V_bid + V_ask)
-    Must be awaited — uses asyncio.sleep to yield the event loop during DOM population.
-    """
-    if not mt5.market_book_add(symbol):
+    subscribed = mt5.market_book_add(symbol)
+    if not subscribed:
         logger.warning(f"Failed to subscribe to market book for {symbol}")
         return 0.0
         
@@ -233,4 +228,5 @@ async def get_order_book_micro_price(symbol: str) -> float:
         return p_micro
         
     finally:
-        mt5.market_book_release(symbol)
+        if subscribed:
+            mt5.market_book_release(symbol)
