@@ -13,6 +13,7 @@ class MessageBus:
         self.raw_signal_queue = asyncio.Queue()      # AlphaEngine -> RiskEngine
         self.approved_signal_queue = asyncio.Queue() # RiskEngine -> ExecutionEngine
         self.param_update_queue = asyncio.Queue()    # ShadowEngine -> AlphaEngine
+        self.multiplier_update_queue = asyncio.Queue() # ShadowEngine -> RiskEngine
         
     async def publish_signal(self, signal: Any) -> None:
         """Alpha Engine uses this to broadcast a signal."""

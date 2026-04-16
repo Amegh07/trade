@@ -10,8 +10,8 @@ logger = logging.getLogger("MarketStateEngine")
 class MarketStateEngine:
     def __init__(self, message_bus: MessageBus):
         self.bus = message_bus
-        # PER-SYMBOL ISOLATION
         self.history = collections.defaultdict(lambda: collections.deque(maxlen=100))
+        self.vol_history = collections.defaultdict(lambda: collections.deque(maxlen=1000))
         
         # HYSTERESIS STATE MACHINE
         self.current_regime = {}
@@ -59,6 +59,18 @@ class MarketStateEngine:
         # 2. Extract standard sequence Volatility
         volatility = np.std(returns)
         
+        self.vol_history[sym].append(volatility)
+        vols = list(self.vol_history[sym])
+        
+        if len(vols) >= 50:
+            vol_mu = np.mean(vols)
+            vol_std = np.std(vols)
+            dyn_high_vol = vol_mu + (2.0 * vol_std)
+            dyn_low_vol = max(0.00001, vol_mu - (1.5 * vol_std))
+        else:
+            dyn_high_vol = self.high_vol_threshold
+            dyn_low_vol = self.range_threshold
+        
         # 3. Extract regression vector Trend Slope directly representing overarching momentum
         x = np.arange(len(norm_arr))
         slope = np.polyfit(x, norm_arr, 1)[0]
@@ -67,11 +79,11 @@ class MarketStateEngine:
         compression = np.max(norm_arr) - np.min(norm_arr)
         
         # --- CLASSIFICATION LAYER ---
-        if volatility > self.high_vol_threshold:
+        if volatility > dyn_high_vol:
             candidate = "VOLATILE"
         elif abs(slope) > self.trend_threshold:
             candidate = "TRENDING"
-        elif compression < self.range_threshold:
+        elif compression < dyn_low_vol:
             candidate = "DEAD"
         else:
             candidate = "RANGING"

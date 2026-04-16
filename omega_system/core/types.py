@@ -27,8 +27,12 @@ class CandleSnapshot:
 
 @dataclass
 class ParamUpdate:
-    z_entry: float
-    z_exit: float
+    regime_params: dict
+
+@dataclass
+class RegimeMultiplierUpdate:
+    regime: str
+    multiplier: float
 
 @dataclass
 class Signal:

@@ -15,16 +15,34 @@ class AlphaEngine:
         self.bus = message_bus
         self.ticks = collections.defaultdict(lambda: collections.deque(maxlen=1000))
         self.last_calc_time = 0.0
-        self.z_entry = 2.0
-        self.z_exit = 0.5
+        
+        # DNA Control (Dynamic Regime Aware Arrays)
+        self.default_params = {"z_entry": 2.1, "z_exit": 0.5}
+        self.regime_params = {}
 
     async def listen_for_params(self):
+        smoothing_factor = 0.3 # 30% new DNA, 70% old DNA
+        from omega_system.core.types import ParamUpdate
         while True:
-            from omega_system.core.types import ParamUpdate
             update: ParamUpdate = await self.bus.param_update_queue.get()
-            self.z_entry = update.z_entry
-            self.z_exit = update.z_exit
-            logger.warning(f"[SHADOW AI] DNA Reprogrammed. New Z-Entry: {self.z_entry:.2f} | Z-Exit: {self.z_exit:.2f}")
+            
+            for regime, new_dna in update.regime_params.items():
+                if regime not in self.regime_params:
+                    self.regime_params[regime] = self.default_params.copy()
+                    
+                old_entry = self.regime_params[regime]["z_entry"]
+                old_exit = self.regime_params[regime]["z_exit"]
+                
+                # EMA Smoothing Layer
+                smoothed_z_entry = ((1.0 - smoothing_factor) * old_entry) + (smoothing_factor * new_dna["z_entry"])
+                smoothed_z_exit = ((1.0 - smoothing_factor) * old_exit) + (smoothing_factor * new_dna["z_exit"])
+                
+                # Hard Safety bounds mapping
+                self.regime_params[regime]["z_entry"] = float(np.clip(smoothed_z_entry, 2.0, 5.0))
+                self.regime_params[regime]["z_exit"] = float(np.clip(smoothed_z_exit, 0.0, 1.0))
+                
+                logger.warning(f"🧬 [{regime}] DNA EVOLUTION Smoothed Z-Entry: {self.regime_params[regime]['z_entry']:.2f} | Z-Exit: {self.regime_params[regime]['z_exit']:.2f}")
+                
             self.bus.param_update_queue.task_done()
 
     async def start_worker(self):
@@ -38,19 +56,22 @@ class AlphaEngine:
     async def _process_tick(self, tick: Tick):
         self.ticks[tick.symbol].append(tick)
         
+        # Log market data seamlessly for historical simulations
+        from omega_system.db.market_data_repo import market_data_repo
+        # Throttle SQLite writes slightly by checking memory array length dynamically if needed
+        # We write every tick here to map highly granular regimes natively.
+        await market_data_repo.save_candle(tick.symbol, tick.last, tick.regime)
+        
         loop = asyncio.get_running_loop()
         
-        # Trigger periodic Cointegration math on an interval (Simulated M15 formation proxy)
         if (loop.time() - self.last_calc_time) > 5.0:
             self.last_calc_time = loop.time()
             
-            # Utilizing asyncio.to_thread prevents the statsmodels OLS from blocking the event loop
             sig = await asyncio.to_thread(self._sync_coint, "EURUSD", "GBPUSD")
             if sig:
                 await self.bus.publish_signal(sig)
 
     def _sync_coint(self, asset_a: str, asset_b: str) -> Signal:
-        """Isolated mathematical processor evaluating historical pricing."""
         q_a = list(self.ticks[asset_a])
         q_b = list(self.ticks[asset_b])
         
@@ -60,7 +81,6 @@ class AlphaEngine:
         df_a = pd.DataFrame([vars(t) for t in q_a])
         df_b = pd.DataFrame([vars(t) for t in q_b])
         
-        # Inner merge aligns time epochs precisely
         df_merged = pd.merge(df_a, df_b, on='time', how='inner', suffixes=('_a', '_b'))
         if len(df_merged) < 100:
             return None
@@ -81,11 +101,12 @@ class AlphaEngine:
             if sigma < 1e-12: return None
             z_score = (spread[-1] - mu) / sigma
             
-            # Fetch derived algorithmic regime from the tick ingestion tail
             current_regime = self.ticks[asset_a][-1].regime if len(self.ticks[asset_a]) > 0 else "UNKNOWN"
             
-            # Emit Signal if beyond execution thresholds
-            if abs(z_score) >= self.z_entry:
+            # Dynamically fetch Regime-Specific Threshold DNA
+            current_z_entry = self.regime_params.get(current_regime, self.default_params)['z_entry']
+            
+            if abs(z_score) >= current_z_entry:
                 logger.info(f"[AlphaEngine] Z-SCORE BREACH ({z_score:.2f}) on {asset_a}/{asset_b} [Regime: {current_regime}]")
                 return Signal(
                     basket_id=f"BSKT_{asset_a}_{asset_b}",
@@ -93,7 +114,7 @@ class AlphaEngine:
                     asset_b=asset_b,
                     action="ENTER",
                     beta=float(beta),
-                    confidence=abs(z_score),  # Proxy for Expected Value to pass Risk limits
+                    confidence=abs(z_score),
                     regime=current_regime
                 )
         except Exception as e:

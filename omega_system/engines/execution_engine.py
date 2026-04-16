@@ -27,7 +27,7 @@ class ExecutionEngine:
             await self._execute_atomic_basket(signal)
             self.bus.approved_signal_queue.task_done()
 
-    def _check_spread(self, symbol: str) -> bool:
+    def _check_spread(self, symbol: str, dynamic_threshold: float) -> bool:
         """Fetches live spread in points, enforcing pre-trade liquidity gates."""
         tick = mt5.symbol_info_tick(symbol)
         info = mt5.symbol_info(symbol)
@@ -36,8 +36,8 @@ class ExecutionEngine:
             return False
             
         spread_points = (tick.ask - tick.bid) / info.point
-        if spread_points > self.spread_threshold:
-            logger.warning(f"[SPREAD GUARD] {symbol} spread {spread_points:.1f} exceeds max {self.spread_threshold} pts.")
+        if spread_points > dynamic_threshold:
+            logger.warning(f"[SPREAD GUARD] {symbol} spread {spread_points:.1f} exceeds max {dynamic_threshold:.1f} pts.")
             return False
             
         return True
@@ -92,29 +92,48 @@ class ExecutionEngine:
         """The core atomic sequence: Pre-Check -> Register -> Leg A -> Leg B -> Rollback."""
         b_id = sig.basket_id
         
+        # --- L2 REGIME DRIVEN SLICING ---
+        current_spread_thresh = float(self.spread_threshold)
+        current_target_lot = sig.target_lot
+        
+        if sig.regime == "VOLATILE":
+            current_target_lot = round(current_target_lot * 0.3, 2)
+            current_spread_thresh *= 0.8
+            logger.info(f"[{b_id}] Splitting size to {current_target_lot} and tightening spread to {current_spread_thresh:.1f} (CHAOS).")
+        elif sig.regime == "DEAD":
+            logger.warning(f"[{b_id}] Execution blocked: Regime is DEAD. Slippage risk too high.")
+            return
+        elif sig.regime == "TRENDING":
+            logger.warning(f"[{b_id}] Execution blocked: Mean Reversion strategy blocked in TRENDING regimes.")
+            return
+
+        if current_target_lot < 0.01:
+            logger.warning(f"[{b_id}] Sliced target lot below broker minimum. Aborting.")
+            return
+            
         # PRE-TRADE SPREAD CHECK
-        spread_a_ok = await asyncio.to_thread(self._check_spread, sig.asset_a)
-        spread_b_ok = await asyncio.to_thread(self._check_spread, sig.asset_b)
+        spread_a_ok = await asyncio.to_thread(self._check_spread, sig.asset_a, current_spread_thresh)
+        spread_b_ok = await asyncio.to_thread(self._check_spread, sig.asset_b, current_spread_thresh)
         
         if not spread_a_ok or not spread_b_ok:
-            logger.warning(f"[{b_id}] Spread check failed. Aborting execution.")
+            logger.warning(f"[{b_id}] Spread check failed safely. Aborting execution.")
             return
         
         # STEP 1: Reserve state as PENDING (Failsafe)
         registered = await self.state.register_pending_basket(
-            b_id, sig.asset_a, sig.target_lot, sig.asset_b, sig.target_lot * sig.beta, sig.confidence, sig.regime
+            b_id, sig.asset_a, current_target_lot, sig.asset_b, current_target_lot * sig.beta, sig.confidence, sig.regime
         )
         if not registered:
             return 
 
         try:
             # STEP 2: Execute PRIMARY Leg A
-            logger.info(f"[{b_id}] Executing Leg A: {sig.asset_a} ({sig.target_lot} Lots)")
-            avg_price_a, leg_a_tickets, filled_a = await self._execute_smart_order(sig.asset_a, "ENTER", sig.target_lot)
+            logger.info(f"[{b_id}] Executing Leg A: {sig.asset_a} ({current_target_lot} Lots)")
+            avg_price_a, leg_a_tickets, filled_a = await self._execute_smart_order(sig.asset_a, "ENTER", current_target_lot)
             
             # Partial Fill Resolution
-            if filled_a < sig.target_lot:
-                logger.error(f"[{b_id}] Leg A PARTIAL FILL ({filled_a}/{sig.target_lot}). Initiating immediate rollback.")
+            if filled_a < current_target_lot:
+                logger.error(f"[{b_id}] Leg A PARTIAL FILL ({filled_a}/{current_target_lot}). Initiating immediate rollback.")
                 if leg_a_tickets:
                     await self._rollback_tickets(sig.asset_a, leg_a_tickets)
                 await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Leg A Partial Fill Rollback")

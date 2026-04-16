@@ -10,10 +10,7 @@ or other automated processes.
 </purpose>
 
 <file_format>
-The content is organized as follof];e];f;we;fwe;f
-e;W;feBlend;
-f;
-;ws:
+The content is organized as follows:
 1. This summary section
 2. Repository information
 3. Directory structure
@@ -89,6 +86,7 @@ omega_system/config/settings.py
 omega_system/config/universe.py
 omega_system/core/message_bus.py
 omega_system/core/types.py
+omega_system/db/market_data_repo.py
 omega_system/db/state_repo.py
 omega_system/db/trades_repo.py
 omega_system/engines/alpha_engine.py
@@ -114,6 +112,44 @@ utils/logger.py
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="omega_system/db/market_data_repo.py">
+import sqlite3
+import os
+import time
+from omega_system.config.settings import settings
+
+class MarketDataRepo:
+    def __init__(self):
+        os.makedirs(os.path.dirname(settings.DB_PATH), exist_ok=True)
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS market_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL,
+                symbol TEXT,
+                close REAL,
+                regime TEXT
+            )
+        """)
+        self.execute("CREATE INDEX IF NOT EXISTS idx_market_data_stamp ON market_data(timestamp)")
+
+    def execute(self, query: str, params: tuple = ()) -> None:
+        conn = sqlite3.connect(settings.DB_PATH, timeout=5.0)
+        cur = conn.cursor()
+        cur.execute(query, params)
+        conn.commit()
+        conn.close()
+
+    async def save_candle(self, symbol: str, close: float, regime: str):
+        import asyncio
+        loop = asyncio.get_event_loop()
+        def _write():
+            query = """INSERT INTO market_data (timestamp, symbol, close, regime) VALUES (?, ?, ?, ?)"""
+            self.execute(query, (time.time(), symbol, close, regime))
+        await loop.run_in_executor(None, _write)
+
+market_data_repo = MarketDataRepo()
+</file>
 
 <file path=".gitignore">
 # Virtual Environments
@@ -606,121 +642,6 @@ If you are developing a production application, we recommend using TypeScript wi
     border-right-color: var(--border);
   }
 }
-</file>
-
-<file path="frontend/src/App.jsx">
-import { useEffect, useState } from 'react'
-import EquityChart from './components/EquityChart'
-import BrainView from './components/BrainView'
-import RiskPanel from './components/RiskPanel'
-import LiveTrades from './components/LiveTrades'
-import ControlPad from './components/ControlPad'
-import TerminalLog from './components/TerminalLog'
-
-function App() {
-  const [signals, setSignals] = useState([])
-  const [logs, setLogs] = useState([])
-  
-  useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws/stream`
-    
-    let ws = null;
-    let reconnectTimeout = null;
-    let isCleanup = false;
-
-    const connect = () => {
-      if (isCleanup) return;
-      
-      console.log(`[WS] Connecting to ${wsUrl}...`);
-      ws = new WebSocket(wsUrl);
-      
-      ws.onopen = () => {
-        console.log("[WS] Connected successfully.");
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          if (payload.type === 'BRAIN_TICK') {
-            setSignals(payload.data);
-          } else if (payload.type === 'LOG') {
-            setLogs(prev => [...prev.slice(-300), payload.message]);
-          }
-        } catch (e) {
-          console.error("[WS] Parse error", e);
-        }
-      };
-
-      ws.onclose = (e) => {
-        if (!isCleanup) {
-          console.warn("[WS] Connection closed unexpectedly. Reconnecting in 3s...", e.reason);
-          reconnectTimeout = setTimeout(connect, 3000);
-        } else {
-          console.log("[WS] Connection closed for cleanup.");
-        }
-      };
-
-      ws.onerror = (err) => {
-        console.error("[WS] Connection error:", err);
-      };
-    };
-
-    connect();
-
-    return () => {
-      isCleanup = true;
-      if (ws) {
-        // Prevent the onclose handler from firing reconnection
-        ws.onclose = null; 
-        ws.close();
-      }
-      if (reconnectTimeout) clearTimeout(reconnectTimeout);
-    };
-  }, []);
-
-  return (
-    <div className="min-h-screen bg-bbg-bg text-gray-300 grid grid-cols-12 grid-rows-6 gap-2 p-2 h-screen">
-      
-      {/* Top Left: Chart (Col 1-8, Row 1-4) */}
-      <div className="col-span-9 row-span-4 border border-bbg-border bg-bbg-panel overflow-hidden flex flex-col">
-        <div className="border-b border-bbg-border p-2 text-bbg-cyan font-bold bg-black tracking-widest text-sm">
-          [ PORTFOLIO EQUITY ]
-        </div>
-        <div className="flex-grow relative bg-[#0a0a0a]">
-          <EquityChart />
-        </div>
-      </div>
-
-      {/* Top Right: Risk & Controls (Col 9-12, Row 1-4) */}
-      <div className="col-span-3 row-span-4 flex flex-col gap-2">
-        <RiskPanel />
-        <ControlPad />
-        <LiveTrades />
-      </div>
-
-      {/* Bottom Left: Terminal (Col 1-8, Row 5-6) */}
-      <div className="col-span-8 row-span-2 border border-bbg-border bg-bbg-panel flex flex-col overflow-hidden">
-        <div className="border-b border-bbg-border p-2 text-bbg-cyan font-bold bg-black tracking-widest text-sm">
-          [ SYSTEM TERMINAL ]
-        </div>
-        <TerminalLog logs={logs} />
-      </div>
-
-      {/* Bottom Right: Brain View (Col 9-12, Row 5-6) */}
-      <div className="col-span-4 row-span-2 border border-bbg-border bg-bbg-panel flex flex-col overflow-hidden">
-        <div className="border-b border-bbg-border p-2 text-bbg-cyan font-bold bg-black flex justify-between tracking-widest text-sm">
-          <span>[ BRAIN MATRIX ]</span>
-          <span className="text-bbg-green animate-pulse">● LIVE</span>
-        </div>
-        <BrainView signals={signals} />
-      </div>
-
-    </div>
-  )
-}
-
-export default App
 </file>
 
 <file path="frontend/src/assets/react.svg">
@@ -2096,61 +2017,6 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info("[APIServer] React Client Disconnected from Socket Bridge.")
 </file>
 
-<file path="omega_system/engines/market_state_engine.py">
-import asyncio
-import logging
-import collections
-import numpy as np
-from omega_system.core.types import Tick
-from omega_system.core.message_bus import MessageBus
-
-logger = logging.getLogger("MarketStateEngine")
-
-class MarketStateEngine:
-    def __init__(self, message_bus: MessageBus):
-        self.bus = message_bus
-        self.history = collections.defaultdict(lambda: collections.deque(maxlen=50))
-
-    async def start_worker(self):
-        logger.info("[MarketStateEngine] Regime detection heuristics online. Sniffing flow.")
-        while True:
-            tick: Tick = await self.bus.raw_tick_queue.get()
-            await self._classify_regime(tick)
-            self.bus.raw_tick_queue.task_done()
-
-    async def _classify_regime(self, tick: Tick):
-        mid = (tick.bid + tick.ask) / 2.0
-        self.history[tick.symbol].append(mid)
-        
-        prices = list(self.history[tick.symbol])
-        
-        # Default fallback
-        regime = "DEAD"
-        
-        if len(prices) >= 20: 
-            std_dev = np.std(prices)
-            mean_price = np.mean(prices)
-            var_pct = std_dev / mean_price
-            
-            # Simple heuristic constants
-            if var_pct > 0.005:  # High volatility / Chop
-                regime = "VOLATILE"
-            elif var_pct < 0.0002: # Extremely tight variance
-                regime = "DEAD"
-            else:
-                # Check for trend vs range via delta mapping over window
-                delta = prices[-1] - prices[0]
-                if abs(delta) > (std_dev * 1.5): # Drifting directionally outside 1.5 bands
-                    regime = "TRENDING"
-                else: # Returning consistently
-                    regime = "RANGING"
-
-        tick.regime = regime
-        
-        # Forward enriched tick to Alpha pipeline
-        await self.bus.regime_tick_queue.put(tick)
-</file>
-
 <file path="omega_system/engines/recon_engine.py">
 import asyncio
 import logging
@@ -2208,6 +2074,9 @@ class ReconciliationEngine:
 import asyncio
 import logging
 import sqlite3
+import pandas as pd
+import numpy as np
+import optuna
 from omega_system.core.message_bus import MessageBus
 from omega_system.core.types import ParamUpdate
 from omega_system.config.settings import settings
@@ -2216,68 +2085,127 @@ logger = logging.getLogger("ShadowEngine")
 
 class ShadowEngine:
     def __init__(self, message_bus: MessageBus):
-        from omega_system.config.settings import settings
         self.bus = message_bus
-        self.current_z_entry = 2.0
-        self.current_z_exit = 0.5 
-        # Clamped Parameters (Guardrails)
-        self.min_z_entry = 2.0
-        self.max_z_entry = 4.5
         self.retrain_timer = settings.SHADOW_AI_RETRAIN_INTERVAL_SEC
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     async def start_worker(self):
-        logger.info("[ShadowEngine] L3 Heuristic AI Adaptation Loop armed.")
+        logger.info("[ShadowEngine] L3 Regime-Aware Optuna Matrix Armed.")
         while True:
-            # Slower cyclic sweep dictated by hyper-parameter registry
             await asyncio.sleep(self.retrain_timer)
             await self._run_adaptation()
 
     async def _run_adaptation(self):
-        logger.info("[ShadowEngine] Accessing historical database for DNA mutation analysis...")
+        logger.info("[ShadowEngine] Initiating Regime-Isolated Full Strategy Simulation...")
+        regime_params = await asyncio.to_thread(self._optimize)
         
-        # Offload DB hit to prevent event loop bottlenecks
-        trades = await asyncio.to_thread(self._fetch_memory)
-        
-        if len(trades) < 5:
-            logger.debug("[ShadowEngine] Insufficient trades for statistical adaptation.")
-            return
-
-        wins = [t for t in trades if t['pnl'] > 0]
-        win_rate = len(wins) / len(trades)
-        avg_pnl = sum(t['pnl'] for t in trades) / len(trades)
-        
-        logger.info(f"[ShadowEngine] Target Analysis: Win Rate={win_rate*100:.1f}%, AvgPnL={avg_pnl:.2f}")
-
-        changed = False
-        
-        # RL Heuristic Optimization Engine
-        if win_rate < 0.40:
-            logger.warning("[ShadowEngine] Edge Decay detected. Tightening entry threshold.")
-            self.current_z_entry = min(self.max_z_entry, self.current_z_entry + 0.2)
-            changed = True
-            
-        elif win_rate > 0.65 and avg_pnl > 0.0:
-            logger.info("[ShadowEngine] Alpha abundance detected. Loosening entry constraints.")
-            self.current_z_entry = max(self.min_z_entry, self.current_z_entry - 0.1)
-            changed = True
-            
-        if changed:
-            logger.warning(f"[ShadowEngine] Emitting DNA Reprogramming Sequence (Z_entry={self.current_z_entry:.2f})...")
-            update = ParamUpdate(z_entry=self.current_z_entry, z_exit=self.current_z_exit)
+        if regime_params:
+            update = ParamUpdate(regime_params=regime_params)
             await self.bus.param_update_queue.put(update)
+            logger.info(f"[ShadowEngine] Dispatching optimal regime matrix: {list(regime_params.keys())}")
 
-    def _fetch_memory(self):
+    def _get_historical_market_data(self):
         try:
             conn = sqlite3.connect(f"file:{settings.DB_PATH}?mode=ro", uri=True)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute("SELECT pnl, regime FROM trades ORDER BY timestamp DESC LIMIT 50")
-            rows = [dict(r) for r in cur.fetchall()]
+            query = """
+                SELECT timestamp, symbol, close, regime 
+                FROM market_data 
+                WHERE symbol IN ('EURUSD', 'GBPUSD') 
+                ORDER BY timestamp DESC 
+                LIMIT 10000
+            """
+            df = pd.read_sql_query(query, conn)
             conn.close()
-            return rows
+            return df
         except Exception as e:
-            logger.error(f"[ShadowEngine] Failed to access trades.db: {e}")
-            return []
+            return pd.DataFrame()
+
+    def _optimize(self):
+        df = self._get_historical_market_data()
+        if df is None or df.empty:
+            logger.debug("[ShadowEngine] Sand-box devoid of data. Optimization bypassed.")
+            return None
+            
+        regimes = df['regime'].dropna().unique()
+        final_params = {}
+        
+        for reg in regimes:
+            if reg == "UNKNOWN" or reg == "DEAD": continue
+            
+            reg_df = df[df['regime'] == reg].copy()
+            
+            # Pivot table to map correlated arrays against chronological timeline
+            df_pivot = reg_df.pivot(index='timestamp', columns='symbol', values='close').sort_index()
+            df_pivot = df_pivot.ffill().dropna()
+            
+            if 'EURUSD' not in df_pivot or 'GBPUSD' not in df_pivot:
+                continue
+                
+            prices_a = df_pivot['EURUSD'].values
+            prices_b = df_pivot['GBPUSD'].values
+            
+            if len(prices_a) < 50:
+                continue
+                
+            spread = prices_a - prices_b 
+            
+            window = 20
+            rolling_mean = pd.Series(spread).rolling(window).mean().values
+            rolling_std = pd.Series(spread).rolling(window).std().values
+            
+            z_scores = (spread - rolling_mean) / (rolling_std + 1e-9)
+
+            def objective(trial):
+                z_entry = trial.suggest_float("z_entry", 2.0, 4.5)
+                z_exit = trial.suggest_float("z_exit", 0.0, 0.8)
+                
+                entry_long = z_scores <= -z_entry
+                entry_short = z_scores >= z_entry
+                exit_signal = np.abs(z_scores) <= z_exit
+                
+                returns = []
+                current_state = 0
+                entry_price = 0.0
+                spread_penalty = 0.0002 
+                
+                for i in range(window, len(z_scores)):
+                    if current_state != 0 and exit_signal[i]:
+                        pn = (spread[i] - entry_price) * current_state - spread_penalty
+                        returns.append(pn)
+                        current_state = 0
+                    elif current_state == 0:
+                        if entry_long[i]:
+                            current_state = 1
+                            entry_price = spread[i]
+                        elif entry_short[i]:
+                            current_state = -1
+                            entry_price = spread[i]
+                            
+                if len(returns) < 5:
+                    return -1.0 # Penalized starvation
+                    
+                ret_arr = np.array(returns)
+                mean_ret = np.mean(ret_arr)
+                std_ret = np.std(ret_arr) + 1e-6
+                sharpe = (mean_ret / std_ret) * np.sqrt(len(ret_arr))
+                
+                cumul = np.cumsum(ret_arr)
+                running_max = np.maximum.accumulate(cumul)
+                drawdown = running_max - cumul
+                max_drawdown = np.max(drawdown) if len(drawdown) > 0 else 0.001
+                
+                score = sharpe - (max_drawdown * 0.2)
+                return score
+                
+            study = optuna.create_study(direction="maximize")
+            study.optimize(objective, n_trials=50)
+            
+            final_params[reg] = {
+                "z_entry": study.best_params["z_entry"],
+                "z_exit": study.best_params["z_exit"]
+            }
+            
+        return final_params if final_params else None
 </file>
 
 <file path="omega_system/engines/watchdog_engine.py">
@@ -3880,6 +3808,159 @@ async def get_order_book_micro_price(symbol: str) -> float:
             mt5.market_book_release(symbol)
 </file>
 
+<file path="frontend/src/App.jsx">
+import { useEffect, useState } from 'react';
+
+function App() {
+  const [livePositions, setLivePositions] = useState({});
+  const [systemHealth, setSystemHealth] = useState({});
+  const [regime, setRegime] = useState("UNKNOWN");
+
+  useEffect(() => {
+    // Force target 8000 for backend WS port
+    const wsUrl = `ws://localhost:8000/ws/stream`;
+    
+    let ws = null;
+    let reconnectTimeout = null;
+    let isCleanup = false;
+
+    const connect = () => {
+      if (isCleanup) return;
+      
+      console.log(`[WS] Connecting to ${wsUrl}...`);
+      ws = new WebSocket(wsUrl);
+      
+      ws.onopen = () => {
+        console.log("[WS] Connected successfully.");
+        setSystemHealth({ status: "ONLINE", connected: true });
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          
+          if (payload.health) {
+             setSystemHealth({ status: payload.health, connected: true });
+          }
+          
+          if (payload.baskets) {
+             setLivePositions(payload.baskets);
+             // Grab regime from the first available basket if any, or default
+             const basketKeys = Object.keys(payload.baskets);
+             if (basketKeys.length > 0) {
+                 setRegime(payload.baskets[basketKeys[0]].regime || "UNKNOWN");
+             }
+          }
+
+        } catch (e) {
+          console.error("[WS] Parse error", e);
+        }
+      };
+
+      ws.onclose = (e) => {
+        if (!isCleanup) {
+          console.warn("[WS] Connection closed unexpectedly. Reconnecting in 3s...", e.reason);
+          setSystemHealth({ status: "OFFLINE", connected: false });
+          reconnectTimeout = setTimeout(connect, 3000);
+        } else {
+          console.log("[WS] Connection closed for cleanup.");
+        }
+      };
+
+      ws.onerror = (err) => {
+        console.error("[WS] Connection error:", err);
+      };
+    };
+
+    connect();
+
+    return () => {
+      isCleanup = true;
+      if (ws) {
+        ws.onclose = null; 
+        ws.close();
+      }
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    };
+  }, []);
+
+  const getRegimeColor = (reg) => {
+    switch (reg) {
+      case 'TRENDING': return 'text-red-500';
+      case 'RANGING': return 'text-green-500';
+      case 'VOLATILE': return 'text-yellow-500';
+      case 'DEAD': return 'text-gray-500';
+      default: return 'text-blue-500';
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-black text-gray-300 p-8 font-mono">
+      <div className="max-w-6xl mx-auto space-y-6">
+        
+        {/* Header Panel */}
+        <div className="border border-gray-800 bg-gray-900 p-6 flex justify-between items-center shadow-lg rounded-sm">
+          <div>
+            <h1 className="text-2xl font-bold tracking-widest text-cyan-400">OMEGA SYSTEM V2 Command Center</h1>
+            <p className="text-sm text-gray-500 mt-1">L0 Failsafe Watchdog & Stream Protocol</p>
+          </div>
+          
+          <div className="text-right flex items-center gap-6">
+             <div className="flex flex-col items-end">
+                <span className="text-xs text-gray-500 tracking-wider">MARKET REGIME</span>
+                <span className={`text-xl font-bold ${getRegimeColor(regime)}`}>[{regime}]</span>
+             </div>
+             
+             <div className="flex flex-col items-end">
+                <span className="text-xs text-gray-500 tracking-wider">WATCHDOG UPLINK</span>
+                <span className={`text-xl font-bold ${systemHealth.connected ? 'text-green-400' : 'text-red-600 animate-pulse'}`}>
+                    {systemHealth.connected ? 'ONLINE' : 'OFFLINE'}
+                </span>
+             </div>
+          </div>
+        </div>
+
+        {/* Live Positions */}
+        <div className="border border-gray-800 bg-gray-900 p-6 shadow-lg rounded-sm">
+           <h2 className="text-lg font-bold tracking-widest text-white mb-4 border-b border-gray-800 pb-2">LIVE EXECUTIONS</h2>
+           
+           {Object.keys(livePositions).length === 0 ? (
+               <div className="text-center py-10 text-gray-600">No active baskets executing. Waiting for edge variance...</div>
+           ) : (
+               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                   {Object.entries(livePositions).map(([bId, basket]) => (
+                       <div key={bId} className="border border-gray-700 bg-gray-800 p-4 rounded-sm flex flex-col">
+                           <div className="flex justify-between items-center border-b border-gray-700 pb-2 mb-2">
+                               <span className="font-bold text-cyan-500">{bId}</span>
+                               <span className={`text-sm px-2 py-1 rounded bg-black font-bold ${basket.status === 'OPEN' ? 'text-green-500' : 'text-yellow-500'}`}>
+                                  {basket.status}
+                               </span>
+                           </div>
+                           <div className="flex justify-between text-sm py-1">
+                               <span className="text-gray-400">Primary Leg:</span>
+                               <span className="text-white">{basket.legs?.PRIMARY || 'Pending'}</span>
+                           </div>
+                           <div className="flex justify-between text-sm py-1">
+                               <span className="text-gray-400">Hedge Leg:</span>
+                               <span className="text-white">{basket.legs?.HEDGE || 'Pending'}</span>
+                           </div>
+                           <div className="flex justify-between text-sm pt-2 mt-2 border-t border-gray-700">
+                               <span className="text-gray-400">Contextual Regime:</span>
+                               <span className={`font-bold ${getRegimeColor(basket.regime)}`}>{basket.regime}</span>
+                           </div>
+                       </div>
+                   ))}
+               </div>
+           )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default App
+</file>
+
 <file path="omega_system/adapters/mt5_client.py">
 import asyncio
 import MetaTrader5 as mt5
@@ -4079,6 +4160,7 @@ class MessageBus:
         self.raw_signal_queue = asyncio.Queue()      # AlphaEngine -> RiskEngine
         self.approved_signal_queue = asyncio.Queue() # RiskEngine -> ExecutionEngine
         self.param_update_queue = asyncio.Queue()    # ShadowEngine -> AlphaEngine
+        self.multiplier_update_queue = asyncio.Queue() # ShadowEngine -> RiskEngine
         
     async def publish_signal(self, signal: Any) -> None:
         """Alpha Engine uses this to broadcast a signal."""
@@ -4125,8 +4207,12 @@ class CandleSnapshot:
 
 @dataclass
 class ParamUpdate:
-    z_entry: float
-    z_exit: float
+    regime_params: dict
+
+@dataclass
+class RegimeMultiplierUpdate:
+    regime: str
+    multiplier: float
 
 @dataclass
 class Signal:
@@ -4329,16 +4415,34 @@ class AlphaEngine:
         self.bus = message_bus
         self.ticks = collections.defaultdict(lambda: collections.deque(maxlen=1000))
         self.last_calc_time = 0.0
-        self.z_entry = 2.0
-        self.z_exit = 0.5
+        
+        # DNA Control (Dynamic Regime Aware Arrays)
+        self.default_params = {"z_entry": 2.1, "z_exit": 0.5}
+        self.regime_params = {}
 
     async def listen_for_params(self):
+        smoothing_factor = 0.3 # 30% new DNA, 70% old DNA
+        from omega_system.core.types import ParamUpdate
         while True:
-            from omega_system.core.types import ParamUpdate
             update: ParamUpdate = await self.bus.param_update_queue.get()
-            self.z_entry = update.z_entry
-            self.z_exit = update.z_exit
-            logger.warning(f"[SHADOW AI] DNA Reprogrammed. New Z-Entry: {self.z_entry:.2f} | Z-Exit: {self.z_exit:.2f}")
+            
+            for regime, new_dna in update.regime_params.items():
+                if regime not in self.regime_params:
+                    self.regime_params[regime] = self.default_params.copy()
+                    
+                old_entry = self.regime_params[regime]["z_entry"]
+                old_exit = self.regime_params[regime]["z_exit"]
+                
+                # EMA Smoothing Layer
+                smoothed_z_entry = ((1.0 - smoothing_factor) * old_entry) + (smoothing_factor * new_dna["z_entry"])
+                smoothed_z_exit = ((1.0 - smoothing_factor) * old_exit) + (smoothing_factor * new_dna["z_exit"])
+                
+                # Hard Safety bounds mapping
+                self.regime_params[regime]["z_entry"] = float(np.clip(smoothed_z_entry, 2.0, 5.0))
+                self.regime_params[regime]["z_exit"] = float(np.clip(smoothed_z_exit, 0.0, 1.0))
+                
+                logger.warning(f"🧬 [{regime}] DNA EVOLUTION Smoothed Z-Entry: {self.regime_params[regime]['z_entry']:.2f} | Z-Exit: {self.regime_params[regime]['z_exit']:.2f}")
+                
             self.bus.param_update_queue.task_done()
 
     async def start_worker(self):
@@ -4352,19 +4456,22 @@ class AlphaEngine:
     async def _process_tick(self, tick: Tick):
         self.ticks[tick.symbol].append(tick)
         
+        # Log market data seamlessly for historical simulations
+        from omega_system.db.market_data_repo import market_data_repo
+        # Throttle SQLite writes slightly by checking memory array length dynamically if needed
+        # We write every tick here to map highly granular regimes natively.
+        await market_data_repo.save_candle(tick.symbol, tick.last, tick.regime)
+        
         loop = asyncio.get_running_loop()
         
-        # Trigger periodic Cointegration math on an interval (Simulated M15 formation proxy)
         if (loop.time() - self.last_calc_time) > 5.0:
             self.last_calc_time = loop.time()
             
-            # Utilizing asyncio.to_thread prevents the statsmodels OLS from blocking the event loop
             sig = await asyncio.to_thread(self._sync_coint, "EURUSD", "GBPUSD")
             if sig:
                 await self.bus.publish_signal(sig)
 
     def _sync_coint(self, asset_a: str, asset_b: str) -> Signal:
-        """Isolated mathematical processor evaluating historical pricing."""
         q_a = list(self.ticks[asset_a])
         q_b = list(self.ticks[asset_b])
         
@@ -4374,7 +4481,6 @@ class AlphaEngine:
         df_a = pd.DataFrame([vars(t) for t in q_a])
         df_b = pd.DataFrame([vars(t) for t in q_b])
         
-        # Inner merge aligns time epochs precisely
         df_merged = pd.merge(df_a, df_b, on='time', how='inner', suffixes=('_a', '_b'))
         if len(df_merged) < 100:
             return None
@@ -4395,11 +4501,12 @@ class AlphaEngine:
             if sigma < 1e-12: return None
             z_score = (spread[-1] - mu) / sigma
             
-            # Fetch derived algorithmic regime from the tick ingestion tail
             current_regime = self.ticks[asset_a][-1].regime if len(self.ticks[asset_a]) > 0 else "UNKNOWN"
             
-            # Emit Signal if beyond execution thresholds
-            if abs(z_score) >= self.z_entry:
+            # Dynamically fetch Regime-Specific Threshold DNA
+            current_z_entry = self.regime_params.get(current_regime, self.default_params)['z_entry']
+            
+            if abs(z_score) >= current_z_entry:
                 logger.info(f"[AlphaEngine] Z-SCORE BREACH ({z_score:.2f}) on {asset_a}/{asset_b} [Regime: {current_regime}]")
                 return Signal(
                     basket_id=f"BSKT_{asset_a}_{asset_b}",
@@ -4407,7 +4514,7 @@ class AlphaEngine:
                     asset_b=asset_b,
                     action="ENTER",
                     beta=float(beta),
-                    confidence=abs(z_score),  # Proxy for Expected Value to pass Risk limits
+                    confidence=abs(z_score),
                     regime=current_regime
                 )
         except Exception as e:
@@ -4520,7 +4627,7 @@ class ExecutionEngine:
             await self._execute_atomic_basket(signal)
             self.bus.approved_signal_queue.task_done()
 
-    def _check_spread(self, symbol: str) -> bool:
+    def _check_spread(self, symbol: str, dynamic_threshold: float) -> bool:
         """Fetches live spread in points, enforcing pre-trade liquidity gates."""
         tick = mt5.symbol_info_tick(symbol)
         info = mt5.symbol_info(symbol)
@@ -4529,8 +4636,8 @@ class ExecutionEngine:
             return False
             
         spread_points = (tick.ask - tick.bid) / info.point
-        if spread_points > self.spread_threshold:
-            logger.warning(f"[SPREAD GUARD] {symbol} spread {spread_points:.1f} exceeds max {self.spread_threshold} pts.")
+        if spread_points > dynamic_threshold:
+            logger.warning(f"[SPREAD GUARD] {symbol} spread {spread_points:.1f} exceeds max {dynamic_threshold:.1f} pts.")
             return False
             
         return True
@@ -4585,29 +4692,48 @@ class ExecutionEngine:
         """The core atomic sequence: Pre-Check -> Register -> Leg A -> Leg B -> Rollback."""
         b_id = sig.basket_id
         
+        # --- L2 REGIME DRIVEN SLICING ---
+        current_spread_thresh = float(self.spread_threshold)
+        current_target_lot = sig.target_lot
+        
+        if sig.regime == "VOLATILE":
+            current_target_lot = round(current_target_lot * 0.3, 2)
+            current_spread_thresh *= 0.8
+            logger.info(f"[{b_id}] Splitting size to {current_target_lot} and tightening spread to {current_spread_thresh:.1f} (CHAOS).")
+        elif sig.regime == "DEAD":
+            logger.warning(f"[{b_id}] Execution blocked: Regime is DEAD. Slippage risk too high.")
+            return
+        elif sig.regime == "TRENDING":
+            logger.warning(f"[{b_id}] Execution blocked: Mean Reversion strategy blocked in TRENDING regimes.")
+            return
+
+        if current_target_lot < 0.01:
+            logger.warning(f"[{b_id}] Sliced target lot below broker minimum. Aborting.")
+            return
+            
         # PRE-TRADE SPREAD CHECK
-        spread_a_ok = await asyncio.to_thread(self._check_spread, sig.asset_a)
-        spread_b_ok = await asyncio.to_thread(self._check_spread, sig.asset_b)
+        spread_a_ok = await asyncio.to_thread(self._check_spread, sig.asset_a, current_spread_thresh)
+        spread_b_ok = await asyncio.to_thread(self._check_spread, sig.asset_b, current_spread_thresh)
         
         if not spread_a_ok or not spread_b_ok:
-            logger.warning(f"[{b_id}] Spread check failed. Aborting execution.")
+            logger.warning(f"[{b_id}] Spread check failed safely. Aborting execution.")
             return
         
         # STEP 1: Reserve state as PENDING (Failsafe)
         registered = await self.state.register_pending_basket(
-            b_id, sig.asset_a, sig.target_lot, sig.asset_b, sig.target_lot * sig.beta, sig.confidence, sig.regime
+            b_id, sig.asset_a, current_target_lot, sig.asset_b, current_target_lot * sig.beta, sig.confidence, sig.regime
         )
         if not registered:
             return 
 
         try:
             # STEP 2: Execute PRIMARY Leg A
-            logger.info(f"[{b_id}] Executing Leg A: {sig.asset_a} ({sig.target_lot} Lots)")
-            avg_price_a, leg_a_tickets, filled_a = await self._execute_smart_order(sig.asset_a, "ENTER", sig.target_lot)
+            logger.info(f"[{b_id}] Executing Leg A: {sig.asset_a} ({current_target_lot} Lots)")
+            avg_price_a, leg_a_tickets, filled_a = await self._execute_smart_order(sig.asset_a, "ENTER", current_target_lot)
             
             # Partial Fill Resolution
-            if filled_a < sig.target_lot:
-                logger.error(f"[{b_id}] Leg A PARTIAL FILL ({filled_a}/{sig.target_lot}). Initiating immediate rollback.")
+            if filled_a < current_target_lot:
+                logger.error(f"[{b_id}] Leg A PARTIAL FILL ({filled_a}/{current_target_lot}). Initiating immediate rollback.")
                 if leg_a_tickets:
                     await self._rollback_tickets(sig.asset_a, leg_a_tickets)
                 await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Leg A Partial Fill Rollback")
@@ -4647,10 +4773,125 @@ class ExecutionEngine:
             await self.state.transition_basket_state(b_id, OrderStatus.FAILED, str(e))
 </file>
 
+<file path="omega_system/engines/market_state_engine.py">
+import asyncio
+import logging
+import collections
+import numpy as np
+from omega_system.core.types import Tick
+from omega_system.core.message_bus import MessageBus
+
+logger = logging.getLogger("MarketStateEngine")
+
+class MarketStateEngine:
+    def __init__(self, message_bus: MessageBus):
+        self.bus = message_bus
+        self.history = collections.defaultdict(lambda: collections.deque(maxlen=100))
+        self.vol_history = collections.defaultdict(lambda: collections.deque(maxlen=1000))
+        
+        # HYSTERESIS STATE MACHINE
+        self.current_regime = {}
+        self.regime_candidate = {}
+        self.regime_candidate_count = collections.defaultdict(int)
+        
+        # ELITE CONSTANTS (Universally Normalized Thresholds)
+        self.high_vol_threshold = 0.0005     # 0.05% return stdev per tick represents violent chop
+        self.trend_threshold = 0.000015      # 0.0015% drift per sequence step marks direction
+        self.range_threshold = 0.0002        # Extremely tightly compressed delta marks deadness
+
+    async def start_worker(self):
+        logger.info("[MarketStateEngine] Elite Regime Detection Armed. Vectorized Matrix Hysteresis Online.")
+        while True:
+            tick: Tick = await self.bus.raw_tick_queue.get()
+            await self._classify_regime(tick)
+            self.bus.raw_tick_queue.task_done()
+
+    async def _classify_regime(self, tick: Tick):
+        sym = tick.symbol
+        mid = (tick.bid + tick.ask) / 2.0
+        self.history[sym].append(mid)
+        
+        # Init base tracking instances
+        if sym not in self.current_regime:
+            self.current_regime[sym] = "UNKNOWN"
+            self.regime_candidate[sym] = "UNKNOWN"
+            
+        prices = list(self.history[sym])
+        
+        if len(prices) < 20: 
+            tick.regime = self.current_regime[sym]
+            await self.bus.regime_tick_queue.put(tick)
+            return
+            
+        # --- ELITE MATH LOGIC ---
+        arr = np.array(prices)
+        
+        # Normalize relative to starting vector mapping arrays safely around universal 1.0 baselines
+        norm_arr = arr / arr[0]
+        
+        # 1. Delta Return array
+        returns = np.diff(norm_arr)
+        
+        # 2. Extract standard sequence Volatility
+        volatility = np.std(returns)
+        
+        self.vol_history[sym].append(volatility)
+        vols = list(self.vol_history[sym])
+        
+        if len(vols) >= 50:
+            vol_mu = np.mean(vols)
+            vol_std = np.std(vols)
+            dyn_high_vol = vol_mu + (2.0 * vol_std)
+            dyn_low_vol = max(0.00001, vol_mu - (1.5 * vol_std))
+        else:
+            dyn_high_vol = self.high_vol_threshold
+            dyn_low_vol = self.range_threshold
+        
+        # 3. Extract regression vector Trend Slope directly representing overarching momentum
+        x = np.arange(len(norm_arr))
+        slope = np.polyfit(x, norm_arr, 1)[0]
+        
+        # 4. Assess boundary compression 
+        compression = np.max(norm_arr) - np.min(norm_arr)
+        
+        # --- CLASSIFICATION LAYER ---
+        if volatility > dyn_high_vol:
+            candidate = "VOLATILE"
+        elif abs(slope) > self.trend_threshold:
+            candidate = "TRENDING"
+        elif compression < dyn_low_vol:
+            candidate = "DEAD"
+        else:
+            candidate = "RANGING"
+            
+        # --- HYSTERESIS APPLICATION ---
+        if candidate == self.current_regime[sym]:
+            self.regime_candidate_count[sym] = 0
+            self.regime_candidate[sym] = candidate
+        else:
+            if candidate == self.regime_candidate[sym]:
+                self.regime_candidate_count[sym] += 1
+            else:
+                self.regime_candidate[sym] = candidate
+                self.regime_candidate_count[sym] = 1
+                
+            if self.regime_candidate_count[sym] >= 5:
+                logger.debug(f"[MarketStateEngine] Regime Shift Hysteresis Passed for {sym}: {self.current_regime[sym]} -> {candidate}")
+                self.current_regime[sym] = candidate
+                self.regime_candidate_count[sym] = 0
+
+        # OUTPUT MAP
+        tick.regime = self.current_regime[sym]
+        await self.bus.regime_tick_queue.put(tick)
+</file>
+
 <file path="omega_system/engines/risk_engine.py">
 import asyncio
 import logging
-from omega_system.core.types import Signal
+import numpy as np
+import MetaTrader5 as mt5
+from datetime import datetime
+from omega_system.core.types import Signal, RegimeMultiplierUpdate
 from omega_system.core.message_bus import MessageBus
 from omega_system.engines.state_engine import StateEngine
 
@@ -4663,16 +4904,87 @@ class RiskEngine:
         self.state = state_engine
         
         # Failsafe Limits driven by universe configuration
-        self.max_daily_loss = settings.MAX_DAILY_LOSS_USD  # Centralized hard stop
-        self.current_daily_pnl = 0.0   # Would be synced from DB on boot
+        self.max_daily_loss = settings.MAX_DAILY_LOSS_USD
+        self.current_daily_pnl = 0.0   
+
+        # AI-Driven Dynamic Multipliers
+        self.regime_multiplier = {
+            "TRENDING": 1.25,  # Aggressive directional mapping
+            "RANGING": 1.0,    # Standard operating baseline
+            "VOLATILE": 0.35,  # Defensive spread widening compensation
+            "DEAD": 0.0,       # Complete Kill-switch
+            "UNKNOWN": 0.0
+        }
+        
+        # Base exposure allocation (Standard lot definition per execution sequence)
+        self.base_lot = 1.0
+        
+        # Baseline target Volatility (0.01% standard deviation norm acting as the scalar center point)
+        self.target_volatility = 0.0001
+
+    async def listen_for_multipliers(self):
+        while True:
+            update: RegimeMultiplierUpdate = await self.bus.multiplier_update_queue.get()
+            self.regime_multiplier[update.regime] = update.multiplier
+            logger.warning(f"[RiskEngine] Shadow AI mapped new EV parameter: {update.regime} -> {update.multiplier:.2f}x")
+            self.bus.multiplier_update_queue.task_done()
 
     async def start_worker(self):
         """Continuously intercepts raw signals to vet them."""
-        logger.info("[RiskEngine] Armed and guarding execution flow...")
+        logger.info("[RiskEngine] Armed and guarding Volatility Adjusted execution flow...")
+        asyncio.create_task(self.listen_for_multipliers())
+        
         while True:
             signal: Signal = await self.bus.raw_signal_queue.get()
             await self._evaluate_signal(signal)
             self.bus.raw_signal_queue.task_done()
+            
+    async def _get_realized_volatility(self, symbol: str) -> float:
+        """Physical tick block fetching via MT5 terminal executing purely isolated from main loops."""
+        loop = asyncio.get_event_loop()
+        
+        # Extrapolating 50 deep raw tick arrays manually
+        ticks = await loop.run_in_executor(None, lambda: mt5.copy_ticks_from(symbol, datetime.now(), 50, mt5.COPY_TICKS_ALL))
+        
+        if ticks is None or len(ticks) < 10:
+            return self.target_volatility
+            
+        mids = (ticks['bid'] + ticks['ask']) / 2.0
+        returns = np.diff(mids) / mids[:-1]
+        vol = np.std(returns)
+        
+        return float(vol) if vol > 0.0 else self.target_volatility
+
+    async def _margin_safety_gate(self, symbol: str, final_lot: float) -> bool:
+        """Isolated evaluation resolving strict true limits checking 1.5x buffer capacity natively."""
+        loop = asyncio.get_event_loop()
+        acc = await loop.run_in_executor(None, mt5.account_info)
+        
+        if not acc: 
+            return False
+            
+        # Simulating required order calculating actual symbol parameters
+        required_margin = await loop.run_in_executor(
+            None, 
+            mt5.order_calc_margin, 
+            mt5.ORDER_TYPE_BUY, 
+            symbol, 
+            final_lot, 
+            acc.margin_free
+        )
+        
+        if required_margin is None:
+            # Fallback estimation 
+            required_margin = final_lot * 1000.0
+            
+        # Calculate strict physical capacity against the 1.5x buffer line
+        limit = required_margin * 1.5
+        
+        if acc.margin_free < limit:
+            logger.error(f"[RiskGuard] Margin depleted. Requires {limit:.2f} | Free: {acc.margin_free:.2f}")
+            return False
+            
+        return True
 
     async def _evaluate_signal(self, sig: Signal):
         b_id = sig.basket_id
@@ -4682,34 +4994,42 @@ class RiskEngine:
             logger.critical(f"[{b_id}] BLOCKED: Max daily loss breached. System halted.")
             return
 
-        # RULE 2: The Mathematical Edge (CRITICAL-5 FIX) + L2 Regime Overrides
-        REGIME_MULTIPLIER = {
-            "RANGING": 1.0,  # Full StatArb resonance
-            "TRENDING": 0.0, # StatArb fails in pure trends, hard veto
-            "VOLATILE": 0.3, # Chop zone whip-saw risk, slash sizing by 70%
-            "DEAD": 0.0,     # Slippage hazard inside flat variance, hard veto
-            "UNKNOWN": 0.0
-        }
+        # RULE 2: L3 Override Regimes
+        reg_mult = self.regime_multiplier.get(sig.regime, 0.0)
         
-        reg_mult = REGIME_MULTIPLIER.get(sig.regime, 0.0)
-        final_risk = sig.confidence * reg_mult
-
-        if final_risk <= 0.0:
-            logger.warning(f"[{b_id}] BLOCKED: Regime is {sig.regime}. Signal discarded.")
+        if reg_mult <= 0.0:
+            logger.warning(f"[{b_id}] BLOCKED: Regime Multiplier triggers Kill-Switch ({sig.regime}). Discarded.")
+            return
+            
+        # RULE 3: Volatility Scale normalization
+        realized_vol = await self._get_realized_volatility(sig.asset_a)
+        raw_vol_scalar = self.target_volatility / realized_vol
+        
+        # Clamp bounds strictly establishing ceiling and floors manually
+        vol_scalar = float(np.clip(raw_vol_scalar, 0.5, 1.5))
+        
+        # RULE 4: Dynamic Capital Allocation Output Mapping
+        raw_lot = self.base_lot * reg_mult * vol_scalar
+        final_lot = max(0.01, round(raw_lot, 2))
+        
+        sig.target_lot = final_lot
+        
+        logger.debug(f"[{b_id}] Sizing parameters - Regime: {reg_mult:.2f}x | Vol_Scalar: {vol_scalar:.2f}x | Final: {final_lot} lots")
+        
+        # RULE 5: 1.5x Margin Test (Terminal Check)
+        margin_safe = await self._margin_safety_gate(sig.asset_a, final_lot)
+        if not margin_safe:
+            logger.warning(f"[{b_id}] BLOCKED: Margin capacity test failure mapped against {final_lot} lot demand.")
             return
 
-        # Sizing algorithm: Convert expected edge array into fractional Lot output limits
-        # Here we translate the static 1.0 lot constraint to conform to the regime multiplier
-        sig.target_lot = max(0.01, round(1.0 * reg_mult, 2))
-        
-        # RULE 3: Exposure Limits
+        # RULE 6: Exposure Limits Mapping
         snapshot = await self.state.get_snapshot()
         if b_id in snapshot:
-            logger.warning(f"[{b_id}] BLOCKED: Basket already active in State Engine.")
+            logger.warning(f"[{b_id}] BLOCKED: Basket natively active in State Registry.")
             return
 
-        # If it survives the gauntlet, pass it to the Muscle.
-        logger.info(f"[{b_id}] APPROVED: Signal passed all risk parameters.")
+        # Passed Comprehensive Array Execution Layer
+        logger.info(f"[{b_id}] APPROVED: Signal breached logic mapping. Exporting {final_lot} lots down pipeline.")
         await self.bus.publish_approved_trade(sig)
 </file>
 
@@ -5458,21 +5778,6 @@ async def websocket_stream(websocket: WebSocket):
             await websocket.close()
         except:
             pass
-</file>
-
-<file path="requirements.txt">
-MetaTrader5
-pandas
-numpy
-python-dotenv
-statsmodels
-
-# asyncio is part of the Python standard library (>= 3.4) — no pip install needed
-asyncio
-fastapi
-uvicorn
-websockets
-aiofiles
 </file>
 
 <file path="utils/logger.py">
@@ -7548,6 +7853,18 @@ if __name__ == "__main__":
     # Windows requires `spawn` (the default) — make it explicit and idempotent
     mp.set_start_method("spawn", force=True)
     supervisor_main()
+</file>
+
+<file path="requirements.txt">
+MetaTrader5>=5.0.45
+pandas>=2.0.0
+numpy>=1.24.0
+statsmodels>=0.14.0
+fastapi>=0.100.0
+uvicorn>=0.23.0
+websockets>=11.0.0
+pydantic>=2.0.0
+optuna>=3.0.0
 </file>
 
 <file path="core/alpha_engine.py">
