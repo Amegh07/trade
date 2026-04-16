@@ -262,3 +262,98 @@
 2026-04-15 00:38:07,373 - main - INFO - [HEALTH] DataFeeder=True | AlphaEngine=True | ExecRouter=True | SignalQ=0 | IOQ=0
 2026-04-15 00:38:37,374 - main - INFO - [HEALTH] DataFeeder=True | AlphaEngine=True | ExecRouter=True | SignalQ=0 | IOQ=0
 2026-04-15 00:39:07,374 - main - INFO - [HEALTH] DataFeeder=True | AlphaEngine=True | ExecRouter=True | SignalQ=0 | IOQ=0
+2026-04-16 22:53:51,628 - main - INFO - ══════════════════════════════════════════════════════════════════
+2026-04-16 22:53:51,628 - main - INFO -    Ω OMEGA ARCHITECTURE — Zero-Latency Execution Engine   
+2026-04-16 22:53:51,628 - main - INFO -    Phase 1: Multiprocess  │ Phase 2: Vectorised NumPy      
+2026-04-16 22:53:51,628 - main - INFO -    Phase 3: OFI Tick-Tape │ Phase 4: Half-Kelly Sizing     
+2026-04-16 22:53:51,628 - main - INFO -    Phase 5: Zero-Blocking DB I/O                            
+2026-04-16 22:53:51,628 - main - INFO - ══════════════════════════════════════════════════════════════════
+2026-04-16 22:53:51,628 - main - INFO - Verifying database schema…
+2026-04-16 22:53:51,640 - main - INFO - Connecting to MT5 for symbol discovery…
+2026-04-16 22:53:51,640 - mt5_client - INFO - Initializing MetaTrader5 connection...
+2026-04-16 22:53:51,640 - mt5_client - INFO - Attempting to launch and log in to 'MetaQuotes-Demo' account '105579222'...
+2026-04-16 22:53:57,097 - mt5_client - INFO - MetaTrader5 initialized successfully.
+2026-04-16 22:53:57,140 - mt5_client - INFO - Dynamically discovered 50 tradeable symbols (Forex + CFDs).
+2026-04-16 22:53:57,148 - mt5_client - INFO - Shutting down MetaTrader5...
+2026-04-16 22:53:57,148 - mt5_client - INFO - MetaTrader5 shutdown complete.
+2026-04-16 22:53:57,148 - main - INFO - Symbol discovery complete: 54 symbols.
+2026-04-16 22:53:57,150 - main - INFO - [SHM] 'omega_ticks_18956' created — 3,456 bytes (54 symbols × 64 bytes each)
+2026-04-16 22:53:57,166 - main - INFO - [PHASE 1] Starting DataFeeder process…
+2026-04-16 22:53:57,174 - main - INFO - [PHASE 1] DataFeeder PID=12584 ✓
+2026-04-16 22:53:57,174 - main - INFO - [PHASE 1] Waiting for DataFeeder first snapshot (timeout=45s)…
+2026-04-16 22:53:58,956 - main - INFO - [PHASE 2/3] Starting AlphaEngine process…
+2026-04-16 22:53:58,963 - main - INFO - [PHASE 2/3] AlphaEngine PID=18420 ✓
+2026-04-16 22:53:58,963 - main - INFO - [PHASE 4/5] Starting ExecRouter process…
+2026-04-16 22:53:58,969 - main - INFO - [PHASE 4/5] ExecRouter PID=20792 ✓
+2026-04-16 22:53:58,969 - main - INFO - [SHADOW] Starting ShadowOptimizer process…
+2026-04-16 22:53:58,976 - main - INFO - [SHADOW] ShadowOptimizer PID=6048 ✓
+2026-04-16 22:53:58,976 - main - INFO - [PHASE 5] IO Queue initialized for ExecRouter DB writes.
+2026-04-16 22:53:58,976 - main - INFO - ══════════════════════════════════════════════════════════════════
+2026-04-16 22:53:58,976 - main - INFO - Ω  ALL OMEGA PROCESSES LIVE. Supervisor entering health monitor.
+2026-04-16 22:53:58,976 - main - INFO - ══════════════════════════════════════════════════════════════════
+2026-04-16 22:54:00,859 - db_writer - INFO - DB Writer daemon started.
+2026-04-16 22:54:00,862 - db_writer - INFO - Last DB maintenance was: 2026-03-16T22:54:00.862492
+2026-04-16 22:54:28,976 - main - INFO - [HEALTH] DataFeeder=True | AlphaEngine=True | ExecRouter=True | SignalQ=0 | IOQ=0
+2026-04-16 22:54:58,977 - main - INFO - [HEALTH] DataFeeder=True | AlphaEngine=True | ExecRouter=True | SignalQ=0 | IOQ=0
+2026-04-16 22:55:28,977 - main - INFO - [HEALTH] DataFeeder=True | AlphaEngine=True | ExecRouter=True | SignalQ=0 | IOQ=0
+2026-04-16 22:55:58,978 - main - INFO - [HEALTH] DataFeeder=True | AlphaEngine=True | ExecRouter=True | SignalQ=0 | IOQ=0
+2026-04-16 22:56:02,407 - main - INFO - Signal SIGINT (2) received, initiating graceful shutdown.
+2026-04-16 22:56:02,911 - main - INFO - Signal SIGINT (2) received, initiating graceful shutdown.
+2026-04-16 22:56:03,258 - main - INFO - Signal SIGINT (2) received, initiating graceful shutdown.
+2026-04-16 22:56:03,724 - main - INFO - Signal SIGINT (2) received, initiating graceful shutdown.
+2026-04-16 22:56:28,797 - main - INFO - Signal SIGINT (2) received, initiating graceful shutdown.
+2026-04-16 22:56:28,979 - main - CRITICAL - ☠  Dead processes detected: ['DataFeeder', 'AlphaEngine', 'ExecRouter', 'ShadowOptimizer']. Initiating emergency shutdown.
+2026-04-16 22:56:28,979 - main - INFO - Broadcasting stop_event to all Omega processes…
+2026-04-16 22:56:28,979 - main - INFO - DataFeeder shutdown complete.
+2026-04-16 22:56:28,979 - main - INFO - AlphaEngine shutdown complete.
+2026-04-16 22:56:28,979 - main - INFO - ExecRouter shutdown complete.
+2026-04-16 22:56:28,979 - main - INFO - ShadowOptimizer shutdown complete.
+2026-04-16 22:56:28,979 - main - INFO - Omega processes stopped.
+2026-04-16 22:56:28,979 - main - INFO - Releasing SharedMemory…
+2026-04-16 22:56:28,979 - main - INFO - SharedMemory 'omega_ticks_18956' released.
+2026-04-16 22:56:28,979 - main - INFO - Ω  Omega Engine stopped cleanly. Goodbye.
+2026-04-16 22:56:34,658 - main - INFO - ══════════════════════════════════════════════════════════════════
+2026-04-16 22:56:34,658 - main - INFO -    Ω OMEGA ARCHITECTURE — Zero-Latency Execution Engine   
+2026-04-16 22:56:34,658 - main - INFO -    Phase 1: Multiprocess  │ Phase 2: Vectorised NumPy      
+2026-04-16 22:56:34,658 - main - INFO -    Phase 3: OFI Tick-Tape │ Phase 4: Half-Kelly Sizing     
+2026-04-16 22:56:34,658 - main - INFO -    Phase 5: Zero-Blocking DB I/O                            
+2026-04-16 22:56:34,658 - main - INFO - ══════════════════════════════════════════════════════════════════
+2026-04-16 22:56:34,658 - main - INFO - Verifying database schema…
+2026-04-16 22:56:34,684 - main - INFO - Connecting to MT5 for symbol discovery…
+2026-04-16 22:56:34,684 - mt5_client - INFO - Initializing MetaTrader5 connection...
+2026-04-16 22:56:34,684 - mt5_client - INFO - Attempting to launch and log in to 'MetaQuotes-Demo' account '105579222'...
+2026-04-16 22:56:34,697 - mt5_client - INFO - MetaTrader5 initialized successfully.
+2026-04-16 22:56:34,742 - mt5_client - INFO - Dynamically discovered 50 tradeable symbols (Forex + CFDs).
+2026-04-16 22:56:34,750 - mt5_client - INFO - Shutting down MetaTrader5...
+2026-04-16 22:56:34,750 - mt5_client - INFO - MetaTrader5 shutdown complete.
+2026-04-16 22:56:34,750 - main - INFO - Symbol discovery complete: 54 symbols.
+2026-04-16 22:56:34,750 - main - INFO - [SHM] 'omega_ticks_17000' created — 3,456 bytes (54 symbols × 64 bytes each)
+2026-04-16 22:56:34,757 - main - INFO - [PHASE 1] Starting DataFeeder process…
+2026-04-16 22:56:34,764 - main - INFO - [PHASE 1] DataFeeder PID=26836 ✓
+2026-04-16 22:56:34,764 - main - INFO - [PHASE 1] Waiting for DataFeeder first snapshot (timeout=45s)…
+2026-04-16 22:56:36,508 - main - INFO - [PHASE 2/3] Starting AlphaEngine process…
+2026-04-16 22:56:36,516 - main - INFO - [PHASE 2/3] AlphaEngine PID=32568 ✓
+2026-04-16 22:56:36,516 - main - INFO - [PHASE 4/5] Starting ExecRouter process…
+2026-04-16 22:56:36,522 - main - INFO - [PHASE 4/5] ExecRouter PID=2572 ✓
+2026-04-16 22:56:36,522 - main - INFO - [SHADOW] Starting ShadowOptimizer process…
+2026-04-16 22:56:36,529 - main - INFO - [SHADOW] ShadowOptimizer PID=31248 ✓
+2026-04-16 22:56:36,529 - main - INFO - [PHASE 5] IO Queue initialized for ExecRouter DB writes.
+2026-04-16 22:56:36,529 - main - INFO - ══════════════════════════════════════════════════════════════════
+2026-04-16 22:56:36,529 - main - INFO - Ω  ALL OMEGA PROCESSES LIVE. Supervisor entering health monitor.
+2026-04-16 22:56:36,529 - main - INFO - ══════════════════════════════════════════════════════════════════
+2026-04-16 22:56:38,276 - db_writer - INFO - DB Writer daemon started.
+2026-04-16 22:56:38,282 - db_writer - INFO - Last DB maintenance was: 2026-03-16T22:56:38.282215
+2026-04-16 22:57:06,529 - main - INFO - [HEALTH] DataFeeder=True | AlphaEngine=True | ExecRouter=True | SignalQ=0 | IOQ=0
+2026-04-16 22:57:33,614 - main - INFO - Signal SIGINT (2) received, initiating graceful shutdown.
+2026-04-16 22:57:33,889 - main - INFO - Signal SIGINT (2) received, initiating graceful shutdown.
+2026-04-16 22:57:34,070 - main - INFO - Signal SIGINT (2) received, initiating graceful shutdown.
+2026-04-16 22:57:36,530 - main - CRITICAL - ☠  Dead processes detected: ['DataFeeder', 'AlphaEngine', 'ExecRouter', 'ShadowOptimizer']. Initiating emergency shutdown.
+2026-04-16 22:57:36,530 - main - INFO - Broadcasting stop_event to all Omega processes…
+2026-04-16 22:57:36,530 - main - INFO - DataFeeder shutdown complete.
+2026-04-16 22:57:36,530 - main - INFO - AlphaEngine shutdown complete.
+2026-04-16 22:57:36,530 - main - INFO - ExecRouter shutdown complete.
+2026-04-16 22:57:36,530 - main - INFO - ShadowOptimizer shutdown complete.
+2026-04-16 22:57:36,530 - main - INFO - Omega processes stopped.
+2026-04-16 22:57:36,530 - main - INFO - Releasing SharedMemory…
+2026-04-16 22:57:36,531 - main - INFO - SharedMemory 'omega_ticks_17000' released.
+2026-04-16 22:57:36,531 - main - INFO - Ω  Omega Engine stopped cleanly. Goodbye.
