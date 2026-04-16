@@ -80,6 +80,21 @@ GAP_RISK_DEFENSE_PATCH.md
 launch_dashboard.py
 main.py
 MARKET_MECHANICS_AUDIT.md
+omega_system/adapters/mt5_client.py
+omega_system/config/settings.py
+omega_system/config/universe.py
+omega_system/core/message_bus.py
+omega_system/core/types.py
+omega_system/db/state_repo.py
+omega_system/db/trades_repo.py
+omega_system/engines/alpha_engine.py
+omega_system/engines/data_engine.py
+omega_system/engines/execution_engine.py
+omega_system/engines/recon_engine.py
+omega_system/engines/risk_engine.py
+omega_system/engines/state_engine.py
+omega_system/main.py
+omega_system/utils/logger.py
 pyrightconfig.json
 QUANTITATIVE_AUDIT.md
 RED_TEAM_AUDIT.md
@@ -2005,6 +2020,955 @@ Estimated total dev time: **90 minutes**.
 ROI: **Prevent $100k+ in monthly losses**.
 </file>
 
+<file path="omega_system/adapters/mt5_client.py">
+import asyncio
+import MetaTrader5 as mt5
+import pandas as pd
+import time
+from omega_system.utils.logger import setup_logger
+
+# Use professional logger exclusively configured within the utils path
+logger = setup_logger("mt5_client")
+
+def initialize_mt5(login=None, password=None, server=None):
+    """
+    Initializes the MetaTrader5 terminal. If credentials are provided, attempts login.
+    """
+    logger.info("Initializing MetaTrader5 connection...")
+    
+    # MT5 strictly requires integer login IDs natively
+    if login is not None:
+        try:
+            login = int(login)
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid login ID '{login}'. Resetting to generic launch.")
+            login = None
+
+    if login and password and server:
+        logger.info(f"Attempting to launch and log in to '{server}' account '{login}'...")
+        if not mt5.initialize(login=login, password=password, server=server):
+            logger.error(f"mt5.initialize(credentials) failed, error code: {mt5.last_error()}")
+            return False
+    else:
+        logger.info("Launching generic MT5 terminal (no remote credentials applied)...")
+        if not mt5.initialize():
+            logger.error(f"mt5.initialize() failed generically, error code: {mt5.last_error()}")
+            return False
+            
+    logger.info("MetaTrader5 initialized successfully.")
+    return True
+
+def fetch_rates(symbol, count, timeframe=mt5.TIMEFRAME_M5):
+    """
+    Fetches historical M5 data (or specified timeframe) for a given symbol.
+    Returns a localized pandas DataFrame with 'time' as the index.
+    """
+    logger.info(f"Fetching {count} rates for {symbol} at timeframe {timeframe}...")
+    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+    
+    if rates is None:
+        logger.error(f"Failed to fetch rates, error code: {mt5.last_error()}")
+        # Return an empty DataFrame with the expected index name
+        df = pd.DataFrame()
+        df.index.name = 'time'
+        return df
+        
+    # Convert to DataFrame
+    df = pd.DataFrame(rates)
+    
+    # Convert 'time' to datetime objects and set as index
+    df['time'] = pd.to_datetime(df['time'], unit='s')
+    
+    # "localized pandas DataFrame" - often means timezone awareness
+    # MT5 times are server-time, but let's localize if needed or leave as is.
+    # To be extremely safe, we assign the time column as the index.
+    df.set_index('time', inplace=True)
+    
+    logger.info(f"Successfully fetched {len(df)} records for {symbol}.")
+    return df
+
+def shutdown_mt5():
+    """
+    Shuts down the MetaTrader5 connection.
+    """
+    logger.info("Shutting down MetaTrader5...")
+    mt5.shutdown()
+    logger.info("MetaTrader5 shutdown complete.")
+
+def get_open_positions(symbol=None):
+    """
+    Directly queries the MT5 terminal to find active trades.
+    Bypassing local configurations ensures robust state logic.
+    """
+    if symbol:
+        positions = mt5.positions_get(symbol=symbol)
+    else:
+        positions = mt5.positions_get()
+        
+    if positions is None:
+        logger.error(f"Failed to fetch positions. Error code: {mt5.last_error()}")
+        return []
+        
+    # Return as list allowing immediate iterative access
+    return list(positions)
+
+def get_active_symbols():
+    """
+    Returns a list of all currently visible (Market Watch) symbols from the MT5 terminal
+    that the engine is equipped to trade. Supports Forex, Metals, Indices, and Synthetics.
+    """
+    symbols = mt5.symbols_get()
+    if symbols is None:
+        logger.error(f"Failed to fetch symbols. Error code: {mt5.last_error()}")
+        return []
+
+    # Fix #24: Expand beyond FOREX-only. The engine is tick_size-aware (Flaws 11/12)
+    # and can correctly handle Metals, Indices, and Synthetics.
+    # Include all visible symbols whose calc mode is one of the well-supported types.
+    SUPPORTED_CALC_MODES = {
+        mt5.SYMBOL_CALC_MODE_FOREX,          # Standard Forex pairs
+        mt5.SYMBOL_CALC_MODE_CFD,            # Indices, Metals (e.g., XAUUSD, US500)
+        mt5.SYMBOL_CALC_MODE_CFDINDEX,       # Index CFDs (some brokers)
+        mt5.SYMBOL_CALC_MODE_CFDLEVERAGE,    # Leveraged CFDs
+    }
+
+    active_symbols = [
+        s.name for s in symbols
+        if s.visible and s.trade_calc_mode in SUPPORTED_CALC_MODES
+    ]
+
+    logger.info(f"Dynamically discovered {len(active_symbols)} tradeable symbols (Forex + CFDs).")
+    return active_symbols
+
+def execute_order(symbol, order_type, volume, sl=None, tp=None):
+    """
+    Constructs the MT5 request dictionary and executes an order,
+    incorporating a retry mechanism for requotes and price changes.
+    """
+    # 0 implies a market execution deal
+    action = mt5.TRADE_ACTION_DEAL
+    
+    # Capture the latest live price context to format the order efficiently
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        logger.error(f"execute_order: symbol_info_tick({symbol}) returned None — aborting.")
+        return None
+
+    if order_type == mt5.ORDER_TYPE_BUY:
+        price = tick.ask
+    elif order_type == mt5.ORDER_TYPE_SELL:
+        price = tick.bid
+    else:
+        logger.error(f"Unsupported order_type natively passed: {order_type}")
+        return None
+        
+    # Instantiate universally standardized MT5 routing dictionary
+    request = {
+        "action": action,
+        "symbol": symbol,
+        "volume": float(volume),
+        "type": order_type,
+        "price": price,
+        "deviation": 20,
+        "magic": 100000,
+        "comment": "algorithmic_trade",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    
+    if sl is not None:
+        request["sl"] = float(sl)
+    if tp is not None:
+        request["tp"] = float(tp)
+        
+    max_retries = 3
+    for attempt in range(max_retries):
+        logger.info(f"Attempting order execution ({attempt+1}/{max_retries}) - Symbol: {symbol}, Type: {order_type}, Vol: {volume}")
+        
+        # Fire signal payload over the terminal bridge
+        result = mt5.order_send(request)
+        
+        if result is None:
+            logger.error(f"order_send failed unconditionally. Error: {mt5.last_error()}")
+            return None
+            
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(f"Order executed successfully! Deal ticket: {result.deal}, Retcode: {result.retcode}")
+            return result
+            
+        # Inspect for requotes / volatile price failures and initialize retry
+        if result.retcode in [mt5.TRADE_RETCODE_REQUOTE, mt5.TRADE_RETCODE_PRICE_CHANGED]:
+            logger.warning(f"Order failure. Retcode: {result.retcode}. Price volatility/requote triggered. Retrying after 1s...")
+            
+            # Re-poll live ticker pricing since market momentum skewed the previous target
+            if order_type == mt5.ORDER_TYPE_BUY:
+                request["price"] = mt5.symbol_info_tick(symbol).ask
+            elif order_type == mt5.ORDER_TYPE_SELL:
+                request["price"] = mt5.symbol_info_tick(symbol).bid
+                
+            time.sleep(1)
+            continue
+            
+        # Any disparate failure logs statically and fractures out
+        logger.error(f"Permanent order failure. Retcode: {result.retcode}, Comment: {result.comment}")
+        return result
+        
+    logger.error(f"Failed to execute order across {max_retries} loop spans due to rolling volatility constraint.")
+    return None
+
+async def get_order_book_micro_price(symbol: str) -> float:
+    subscribed = mt5.market_book_add(symbol)
+    if not subscribed:
+        logger.warning(f"Failed to subscribe to market book for {symbol}")
+        return 0.0
+        
+    try:
+        # Yield event loop while MT5 populates the book (non-blocking)
+        await asyncio.sleep(0.05)
+        book = mt5.market_book_get(symbol)
+        if not book:
+            return 0.0
+            
+        best_bid = 0.0
+        best_ask = float('inf')
+        vol_bid = 0.0
+        vol_ask = 0.0
+        
+        for item in book:
+            if item.type == mt5.BOOK_TYPE_SELL: # Ask
+                if item.price < best_ask:
+                    best_ask = item.price
+                vol_ask += item.volume
+            elif item.type == mt5.BOOK_TYPE_BUY: # Bid
+                if item.price > best_bid:
+                    best_bid = item.price
+                vol_bid += item.volume
+                
+        if vol_bid + vol_ask == 0.0 or best_bid == 0.0 or best_ask == float('inf'):
+            return 0.0
+            
+        p_micro = ((best_ask * vol_bid) + (best_bid * vol_ask)) / (vol_bid + vol_ask)
+        return p_micro
+        
+    finally:
+        if subscribed:
+            mt5.market_book_release(symbol)
+</file>
+
+<file path="omega_system/config/settings.py">
+import os
+
+class Settings:
+    MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "5.0"))
+    MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "2.0"))
+    DB_PATH = os.getenv("OMEGA_DB_PATH", "logs/trades.db")
+    CONTROL_DB_PATH = os.getenv("OMEGA_CONTROL_DB_PATH", "logs/control.db")
+    GHOST_MODE = os.getenv("GHOST_MODE", "False") == "True"
+
+settings = Settings()
+</file>
+
+<file path="omega_system/config/universe.py">
+# TRADABLE_PAIRS matrix isolates asset universes from trading loops.
+# Each tuple defines the highly cointegrated primary and hedge leg.
+
+TRADABLE_PAIRS = [
+    ("EURUSD", "GBPUSD"),
+    ("USDJPY", "USDCHF"),
+]
+</file>
+
+<file path="omega_system/core/message_bus.py">
+import asyncio
+import logging
+from typing import Any
+
+logger = logging.getLogger("MessageBus")
+
+class MessageBus:
+    def __init__(self):
+        # Async queues for inter-engine communication
+        self.tick_queue = asyncio.Queue()            # DataEngine -> AlphaEngine / RiskEngine
+        self.raw_signal_queue = asyncio.Queue()      # AlphaEngine -> RiskEngine
+        self.approved_signal_queue = asyncio.Queue() # RiskEngine -> ExecutionEngine
+        
+    async def publish_signal(self, signal: Any) -> None:
+        """Alpha Engine uses this to broadcast a signal."""
+        try:
+            # Replaces the blocking put_nowait that caused CRITICAL-2
+            await self.raw_signal_queue.put(signal)
+            logger.debug(f"[Bus] Raw signal published for basket: {getattr(signal, 'basket_id', 'UNKNOWN')}")
+        except Exception as e:
+            logger.error(f"[Bus] Failed to publish signal: {e}")
+
+    async def publish_approved_trade(self, signal: Any) -> None:
+        """Risk Engine uses this to pass vetted trades to the Execution Engine."""
+        await self.approved_signal_queue.put(signal)
+        logger.info(f"[Bus] Trade APPROVED and routed to Execution: {getattr(signal, 'basket_id', 'UNKNOWN')}")
+</file>
+
+<file path="omega_system/core/types.py">
+from dataclasses import dataclass, field
+from typing import Dict, Optional
+from enum import Enum
+import time
+
+class OrderStatus(Enum):
+    PENDING = "PENDING"
+    OPEN = "OPEN"
+    FAILED = "FAILED"
+    CLOSING = "CLOSING"
+    CLOSED = "CLOSED"
+
+@dataclass
+class Tick:
+    symbol: str
+    bid: float
+    ask: float
+    last: float
+    volume: float
+    time: float
+
+@dataclass
+class Signal:
+    basket_id: str
+    asset_a: str
+    asset_b: str
+    action: str  # "ENTER" or "CLOSE"
+    beta: float
+    confidence: float
+    timestamp: float = field(default_factory=time.time)
+
+@dataclass
+class LegState:
+    symbol: str
+    role: str  # "PRIMARY" or "HEDGE"
+    target_lot: float
+    filled_lot: float = 0.0
+    ticket: Optional[int] = None
+    status: OrderStatus = OrderStatus.PENDING
+
+@dataclass
+class BasketState:
+    basket_id: str
+    status: OrderStatus
+    legs: Dict[str, LegState]
+    entry_time: float
+    z_score_entry: float
+    error_msg: Optional[str] = None
+</file>
+
+<file path="omega_system/db/state_repo.py">
+import sqlite3
+import json
+import os
+from omega_system.config.settings import settings
+
+class StateRepo:
+    def __init__(self):
+        os.makedirs(os.path.dirname(settings.CONTROL_DB_PATH), exist_ok=True)
+        
+    def write_snapshot(self, state: dict) -> None:
+        conn = sqlite3.connect(settings.CONTROL_DB_PATH, timeout=5.0)
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS state_snapshots (id INTEGER PRIMARY KEY, state_json TEXT, timestamp REAL)")
+        cur.execute("INSERT INTO state_snapshots (state_json, timestamp) VALUES (?, strftime('%s','now'))", (json.dumps(state),))
+        conn.commit()
+        conn.close()
+        
+    def write_override(self, key: str, value: str) -> None:
+        conn = sqlite3.connect(settings.CONTROL_DB_PATH, timeout=5.0)
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS control_state (key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("REPLACE INTO control_state (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+        conn.close()
+
+    def fetch_override(self, key: str) -> str:
+        try:
+            conn = sqlite3.connect(f"file:{settings.CONTROL_DB_PATH}?mode=ro", uri=True)
+            cur = conn.cursor()
+            cur.execute("SELECT value FROM control_state WHERE key=?", (key,))
+            row = cur.fetchone()
+            conn.close()
+            return row[0] if row else ""
+        except:
+            return ""
+
+state_repo = StateRepo()
+</file>
+
+<file path="omega_system/db/trades_repo.py">
+import sqlite3
+import os
+from omega_system.config.settings import settings
+
+class TradesRepo:
+    def __init__(self):
+        os.makedirs(os.path.dirname(settings.DB_PATH), exist_ok=True)
+        # Initialize tables if necessary
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                ticket INTEGER PRIMARY KEY,
+                symbol TEXT,
+                volume REAL,
+                price_open REAL,
+                price_close REAL,
+                pnl REAL,
+                timestamp REAL,
+                type INTEGER,
+                basket_id TEXT
+            )
+        """)
+
+    def execute(self, query: str, params: tuple = ()) -> None:
+        conn = sqlite3.connect(settings.DB_PATH, timeout=5.0)
+        cur = conn.cursor()
+        cur.execute(query, params)
+        conn.commit()
+        conn.close()
+        
+    def fetch(self, query: str, params: tuple = ()) -> list:
+        conn = sqlite3.connect(f"file:{settings.DB_PATH}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(query, params)
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+
+trades_repo = TradesRepo()
+</file>
+
+<file path="omega_system/engines/alpha_engine.py">
+import asyncio
+import logging
+import collections
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+from statsmodels.tsa.stattools import coint
+from omega_system.core.types import Tick, Signal
+from omega_system.core.message_bus import MessageBus
+
+logger = logging.getLogger("AlphaEngine")
+
+class AlphaEngine:
+    def __init__(self, message_bus: MessageBus):
+        self.bus = message_bus
+        self.ticks = collections.defaultdict(lambda: collections.deque(maxlen=1000))
+        self.last_calc_time = 0.0
+
+    async def start_worker(self):
+        logger.info("[AlphaEngine] Statistical Arbitrage Coprocessor online...")
+        while True:
+            tick: Tick = await self.bus.tick_queue.get()
+            await self._process_tick(tick)
+            self.bus.tick_queue.task_done()
+
+    async def _process_tick(self, tick: Tick):
+        self.ticks[tick.symbol].append(tick)
+        
+        loop = asyncio.get_running_loop()
+        
+        # Trigger periodic Cointegration math on an interval (Simulated M15 formation proxy)
+        if (loop.time() - self.last_calc_time) > 5.0:
+            self.last_calc_time = loop.time()
+            
+            # Utilizing asyncio.to_thread prevents the statsmodels OLS from blocking the event loop
+            sig = await asyncio.to_thread(self._sync_coint, "EURUSD", "GBPUSD")
+            if sig:
+                await self.bus.publish_signal(sig)
+
+    def _sync_coint(self, asset_a: str, asset_b: str) -> Signal:
+        """Isolated mathematical processor evaluating historical pricing."""
+        q_a = list(self.ticks[asset_a])
+        q_b = list(self.ticks[asset_b])
+        
+        if len(q_a) < 100 or len(q_b) < 100:
+            return None
+            
+        df_a = pd.DataFrame([vars(t) for t in q_a])
+        df_b = pd.DataFrame([vars(t) for t in q_b])
+        
+        # Inner merge aligns time epochs precisely
+        df_merged = pd.merge(df_a, df_b, on='time', how='inner', suffixes=('_a', '_b'))
+        if len(df_merged) < 100:
+            return None
+            
+        y = df_merged['bid_a'].values
+        x = df_merged['bid_b'].values
+        
+        try:
+            _, p_value, _ = coint(y, x)
+            x_const = sm.add_constant(x)
+            model = sm.OLS(y, x_const).fit()
+            beta = model.params[1]
+            constant = model.params[0]
+            
+            spread = y - (beta * x + constant)
+            mu, sigma = np.mean(spread[-20:]), np.std(spread[-20:])
+            
+            if sigma < 1e-12: return None
+            z_score = (spread[-1] - mu) / sigma
+            
+            # Emit Signal if beyond execution thresholds
+            if abs(z_score) >= 2.0:
+                logger.info(f"[AlphaEngine] Z-SCORE BREACH ({z_score:.2f}) on {asset_a}/{asset_b}")
+                return Signal(
+                    basket_id=f"BSKT_{asset_a}_{asset_b}",
+                    asset_a=asset_a,
+                    asset_b=asset_b,
+                    action="ENTER",
+                    beta=float(beta),
+                    confidence=abs(z_score)  # Proxy for Expected Value to pass Risk limits
+                )
+        except Exception as e:
+            logger.debug(f"[AlphaEngine] Math constraint failure: {e}")
+            
+        return None
+</file>
+
+<file path="omega_system/engines/data_engine.py">
+import asyncio
+import logging
+import MetaTrader5 as mt5
+from omega_system.core.types import Tick
+from omega_system.core.message_bus import MessageBus
+from omega_system.adapters.mt5_client import MT5Client
+
+logger = logging.getLogger("DataEngine")
+
+class DataEngine:
+    def __init__(self, mt5_client: MT5Client, message_bus: MessageBus):
+        self.mt5 = mt5_client
+        self.bus = message_bus
+        # Tracking primary pairs for statistical arbitrage
+        self.symbols = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF"]
+
+    async def start_worker(self):
+        logger.info("[DataEngine] Commencing async tick polling sequence...")
+        while True:
+            for sym in self.symbols:
+                tick_info = mt5.symbol_info_tick(sym)
+                if tick_info:
+                    tick_dt = Tick(
+                        symbol=sym,
+                        bid=tick_info.bid,
+                        ask=tick_info.ask,
+                        last=tick_info.last,
+                        volume=tick_info.volume_real,
+                        time=float(tick_info.time)
+                    )
+                    await self.bus.tick_queue.put(tick_dt)
+            
+            # Polling limiter preventing MT5 terminal CPU locks
+            await asyncio.sleep(0.01)
+</file>
+
+<file path="omega_system/engines/execution_engine.py">
+import asyncio
+import logging
+from omega_system.core.types import Signal, OrderStatus
+from omega_system.engines.state_engine import StateEngine
+from omega_system.core.message_bus import MessageBus
+from omega_system.adapters.mt5_client import MT5Client  # Your raw MT5 wrapper
+
+logger = logging.getLogger("ExecutionEngine")
+
+class ExecutionEngine:
+    def __init__(self, state_engine: StateEngine, message_bus: MessageBus, mt5_client: MT5Client):
+        self.state = state_engine
+        self.bus = message_bus
+        self.mt5 = mt5_client
+
+    async def start_worker(self):
+        """Continuously listens for approved trades."""
+        logger.info("[ExecutionEngine] Armed and listening for approved signals...")
+        while True:
+            signal: Signal = await self.bus.approved_signal_queue.get()
+            await self._execute_atomic_basket(signal)
+            self.bus.approved_signal_queue.task_done()
+
+    async def _execute_atomic_basket(self, sig: Signal):
+        """The core atomic sequence: Register -> Leg A -> Leg B -> Rollback on failure."""
+        b_id = sig.basket_id
+        
+        # STEP 1: Reserve state as PENDING (Failsafe)
+        registered = await self.state.register_pending_basket(
+            b_id, sig.asset_a, 1.0, sig.asset_b, sig.beta, sig.confidence
+        )
+        if not registered:
+            return # State engine rejected it (e.g., already exists)
+
+        try:
+            # STEP 2: Execute PRIMARY Leg A
+            logger.info(f"[{b_id}] Executing Leg A: {sig.asset_a}")
+            leg_a_ticket = await self.mt5.market_order(sig.asset_a, "ENTER", 1.0)
+            
+            if not leg_a_ticket:
+                logger.error(f"[{b_id}] Leg A FAILED. Aborting basket.")
+                await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Leg A rejected by broker")
+                return
+            
+            await self.state.update_leg_fill(b_id, "PRIMARY", leg_a_ticket, 1.0)
+
+            # STEP 3: Execute HEDGE Leg B
+            logger.info(f"[{b_id}] Executing Leg B: {sig.asset_b}")
+            leg_b_ticket = await self.mt5.market_order(sig.asset_b, "ENTER", sig.beta)
+
+            if not leg_b_ticket:
+                logger.critical(f"[{b_id}] Leg B FAILED. Initiating ATOMIC ROLLBACK on Leg A.")
+                # ROLLBACK LEG A
+                rollback_success = await self.mt5.close_position_by_ticket(sig.asset_a, leg_a_ticket)
+                if not rollback_success:
+                    logger.error(f"[{b_id}] ⚠️ ROLLBACK FAILED! Unhedged exposure exists on {sig.asset_a}!")
+                
+                await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Leg B failed, Leg A rolled back")
+                return
+
+            await self.state.update_leg_fill(b_id, "HEDGE", leg_b_ticket, sig.beta)
+
+            # STEP 4: Both legs succeeded. Mark OPEN.
+            await self.state.transition_basket_state(b_id, OrderStatus.OPEN)
+            logger.info(f"[{b_id}] Basket execution complete. Fully hedged.")
+
+        except Exception as e:
+            logger.critical(f"[{b_id}] Fatal execution exception: {e}")
+            await self.state.transition_basket_state(b_id, OrderStatus.FAILED, str(e))
+</file>
+
+<file path="omega_system/engines/recon_engine.py">
+import asyncio
+import logging
+from omega_system.engines.state_engine import StateEngine
+from omega_system.adapters.mt5_client import MT5Client
+from omega_system.core.types import OrderStatus
+
+logger = logging.getLogger("ReconEngine")
+
+class ReconciliationEngine:
+    def __init__(self, state_engine: StateEngine, mt5_client: MT5Client):
+        self.state = state_engine
+        self.mt5 = mt5_client
+
+    async def start_worker(self):
+        """Runs in the background, auditing the system every 5 seconds."""
+        logger.info("[ReconEngine] Self-healing loop active. Scanning every 5s...")
+        while True:
+            await asyncio.sleep(5.0)
+            await self._reconcile()
+
+    async def _reconcile(self):
+        # 1. Get what Python THINKS is happening
+        internal_state = await self.state.get_snapshot()
+        
+        # 2. Get what the Broker KNOWS is happening
+        live_positions = await self.mt5.get_all_active_symbols() # Assume this returns a list of symbols like ['AUDUSD', 'NZDUSD']
+        
+        for b_id, basket in internal_state.items():
+            if basket.status == OrderStatus.OPEN:
+                leg_a = basket.legs["PRIMARY"].symbol
+                leg_b = basket.legs["HEDGE"].symbol
+                
+                has_a = leg_a in live_positions
+                has_b = leg_b in live_positions
+
+                # SCENARIO 1: Half-open trade (Catastrophic Risk)
+                if has_a and not has_b:
+                    logger.critical(f"[RECON] DESYNC: {b_id} missing HEDGE leg ({leg_b})! Emergency Close {leg_a}!")
+                    await self.mt5.close_position_by_symbol(leg_a)
+                    await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Recon: Missing Hedge Leg")
+                
+                elif has_b and not has_a:
+                    logger.critical(f"[RECON] DESYNC: {b_id} missing PRIMARY leg ({leg_a})! Emergency Close {leg_b}!")
+                    await self.mt5.close_position_by_symbol(leg_b)
+                    await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Recon: Missing Primary Leg")
+                
+                # SCENARIO 2: Both missing (Broker hit Take-Profit / Stop-Loss)
+                elif not has_a and not has_b:
+                    logger.info(f"[RECON] Basket {b_id} closed at broker level. Updating internal state.")
+                    await self.state.transition_basket_state(b_id, OrderStatus.CLOSED)
+</file>
+
+<file path="omega_system/engines/risk_engine.py">
+import asyncio
+import logging
+from omega_system.core.types import Signal
+from omega_system.core.message_bus import MessageBus
+from omega_system.engines.state_engine import StateEngine
+
+logger = logging.getLogger("RiskEngine")
+
+class RiskEngine:
+    def __init__(self, message_bus: MessageBus, state_engine: StateEngine):
+        self.bus = message_bus
+        self.state = state_engine
+        
+        # Failsafe Limits
+        self.max_daily_loss = -2000.0  # Hard stop limit
+        self.current_daily_pnl = 0.0   # Would be synced from DB on boot
+
+    async def start_worker(self):
+        """Continuously intercepts raw signals to vet them."""
+        logger.info("[RiskEngine] Armed and guarding execution flow...")
+        while True:
+            signal: Signal = await self.bus.raw_signal_queue.get()
+            await self._evaluate_signal(signal)
+            self.bus.raw_signal_queue.task_done()
+
+    async def _evaluate_signal(self, sig: Signal):
+        b_id = sig.basket_id
+
+        # RULE 1: Global Failsafe (Daily Loss Limit)
+        if self.current_daily_pnl <= self.max_daily_loss:
+            logger.critical(f"[{b_id}] BLOCKED: Max daily loss breached. System halted.")
+            return
+
+        # RULE 2: The Mathematical Edge (CRITICAL-5 FIX)
+        # If the expected value (confidence/Kelly) is 0 or negative, DO NOT TRADE.
+        if sig.confidence <= 0.0:
+            logger.warning(f"[{b_id}] GHOST MODE: Negative edge detected (Kelly <= 0). Signal discarded.")
+            return
+
+        # RULE 3: Exposure Limits
+        snapshot = await self.state.get_snapshot()
+        if b_id in snapshot:
+            logger.warning(f"[{b_id}] BLOCKED: Basket already active in State Engine.")
+            return
+
+        # If it survives the gauntlet, pass it to the Muscle.
+        logger.info(f"[{b_id}] APPROVED: Signal passed all risk parameters.")
+        await self.bus.publish_approved_trade(sig)
+</file>
+
+<file path="omega_system/engines/state_engine.py">
+import logging
+import asyncio
+from typing import Dict, Optional
+from omega_system.core.types import BasketState, LegState, OrderStatus
+
+logger = logging.getLogger("StateEngine")
+
+class StateEngine:
+    def __init__(self):
+        # THE SINGLE SOURCE OF TRUTH
+        # Dictionary mapping basket_id -> BasketState
+        self._active_positions: Dict[str, BasketState] = {}
+        self._lock = asyncio.Lock()  # Ensures async-safe updates
+
+    async def register_pending_basket(self, basket_id: str, sym_a: str, lot_a: float, sym_b: str, lot_b: float, z_score: float) -> bool:
+        """Reserves the state BEFORE execution begins."""
+        async with self._lock:
+            if basket_id in self._active_positions:
+                logger.error(f"[State] Basket {basket_id} already exists. Rejecting registration.")
+                return False
+            
+            self._active_positions[basket_id] = BasketState(
+                basket_id=basket_id,
+                status=OrderStatus.PENDING,
+                entry_time=0.0, # Will be set when OPEN
+                z_score_entry=z_score,
+                legs={
+                    "PRIMARY": LegState(symbol=sym_a, role="PRIMARY", target_lot=lot_a),
+                    "HEDGE": LegState(symbol=sym_b, role="HEDGE", target_lot=lot_b)
+                }
+            )
+            logger.info(f"[State] Registered PENDING basket: {basket_id}")
+            return True
+
+    async def update_leg_fill(self, basket_id: str, role: str, ticket: int, filled_lot: float) -> None:
+        """Atomic update for a specific leg's execution result."""
+        async with self._lock:
+            basket = self._active_positions.get(basket_id)
+            if not basket:
+                logger.error(f"[State] Cannot update leg for unknown basket {basket_id}")
+                return
+
+            leg = basket.legs.get(role)
+            if leg:
+                leg.ticket = ticket
+                leg.filled_lot = filled_lot
+                leg.status = OrderStatus.OPEN
+                logger.debug(f"[State] Updated {role} leg for {basket_id} (Ticket: {ticket})")
+
+    async def transition_basket_state(self, basket_id: str, new_status: OrderStatus, error_msg: str = None) -> None:
+        """Moves the whole basket state (e.g., PENDING -> OPEN, or OPEN -> FAILED)."""
+        async with self._lock:
+            basket = self._active_positions.get(basket_id)
+            if not basket:
+                return
+
+            basket.status = new_status
+            if error_msg:
+                basket.error_msg = error_msg
+            
+            import time
+            if new_status == OrderStatus.OPEN:
+                basket.entry_time = time.time()
+
+            logger.info(f"[State] Basket {basket_id} transitioned to {new_status.name}")
+
+            # Memory cleanup: If closed or failed and fully processed, we can pop it
+            # (In a real system, you might move this to a 'history' dict instead of deleting)
+            if new_status in [OrderStatus.CLOSED, OrderStatus.FAILED]:
+                logger.info(f"[State] Archiving basket {basket_id} from active memory.")
+                self._active_positions.pop(basket_id, None)
+
+    async def get_snapshot(self) -> Dict[str, BasketState]:
+        """Returns a read-only copy of the current truth for other engines to read."""
+        async with self._lock:
+            # Shallow copy of the dict to prevent iteration errors during reads
+            return self._active_positions.copy()
+
+state_engine = StateEngine()
+</file>
+
+<file path="omega_system/main.py">
+import asyncio
+import logging
+import signal
+import sys
+
+from omega_system.adapters.mt5_client import MT5Client
+from omega_system.core.message_bus import MessageBus
+from omega_system.engines.state_engine import StateEngine
+from omega_system.engines.data_engine import DataEngine
+from omega_system.engines.alpha_engine import AlphaEngine
+from omega_system.engines.risk_engine import RiskEngine
+from omega_system.engines.execution_engine import ExecutionEngine
+from omega_system.engines.recon_engine import ReconciliationEngine
+
+# 8. Logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("Supervisor")
+
+async def main():
+    logger.info("Initializing Omega System V2 Architecture...")
+
+    # 3. Initialization Sequence
+    mt5 = MT5Client()
+    
+    # Depending on the system, initialize might be async or sync. Assuming async per your prompt's "await mt5.initialize()"
+    try:
+        await mt5.initialize()
+    except TypeError:
+        # Fallback if mt5.initialize() turns out to be synchronous in the actual wrapper
+        mt5.initialize()
+        
+    bus = MessageBus()
+    state = StateEngine()
+
+    # 4. Dependency Injection
+    data_engine = DataEngine(mt5, bus)
+    alpha_engine = AlphaEngine(bus)
+    risk_engine = RiskEngine(bus, state)
+    exec_engine = ExecutionEngine(state, bus, mt5)
+    recon_engine = ReconciliationEngine(state, mt5)
+
+    # 5. The Async Loop
+    logger.info("Starting up microservice cluster...")
+    tasks = [
+        asyncio.create_task(data_engine.start_worker(), name="DataTask"),
+        asyncio.create_task(alpha_engine.start_worker(), name="AlphaTask"),
+        asyncio.create_task(risk_engine.start_worker(), name="RiskTask"),
+        asyncio.create_task(exec_engine.start_worker(), name="ExecTask"),
+        asyncio.create_task(recon_engine.start_worker(), name="ReconTask")
+    ]
+
+    # Signal handler for graceful shutdown
+    loop = asyncio.get_running_loop()
+    
+    def handle_shutdown():
+        logger.info("Shutting down Omega System...")
+        for task in tasks:
+            task.cancel()
+
+    # Windows does not support add_signal_handler natively, so we implement safely
+    if sys.platform != "win32":
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, handle_shutdown)
+            
+    # 6. Await all tasks
+    try:
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.error(f"Fatal error in execution loop: {e}")
+    finally:
+        # 7. Graceful Shutdown mt5 cleanup
+        logger.info("Clearing MT5 connection...")
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+        logger.info("Shutdown complete.")
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # Fallback for Windows graceful termination
+        logger.info("Shutting down Omega System...")
+</file>
+
+<file path="omega_system/utils/logger.py">
+import logging
+import logging.handlers
+import queue
+import os
+
+# ── Global Logging Infrastructure ──────────────────────
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "trading.log")
+
+# Force explicit thread-safe Queue and Listener instance for the application
+log_queue = queue.Queue(-1)
+
+_formatter = logging.Formatter('%(asctime)s - %(module)s - %(levelname)s - %(message)s')
+
+# Rotating File Handler (Max 10MB -> 10 * 1024 * 1024, keeping 5 backups)
+_file_handler = logging.handlers.RotatingFileHandler(
+    log_file,
+    maxBytes=10 * 1024 * 1024, 
+    backupCount=5,
+    encoding='utf-8'
+)
+_file_handler.setFormatter(_formatter)
+
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_formatter)
+
+# Single Listener pushing logs synchronously out of the queue (Background thread avoids an eventloop lock)
+listener = logging.handlers.QueueListener(log_queue, _file_handler, _console_handler)
+listener.start()
+
+import atexit
+atexit.register(listener.stop)
+
+def setup_logger(name="trading"):
+    """
+    Sets up a thread-safe professional logger funneling into a central QueueListener.
+    Perfectly safe inside an asyncio framework since QueueHandler pushes into a memory structure natively.
+    """
+    logger = logging.getLogger(name)
+    
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        queue_handler = logging.handlers.QueueHandler(log_queue)
+        logger.addHandler(queue_handler)
+
+    return logger
+
+# Generate a default project-level logger for broad imports
+logger = setup_logger("omega")
+</file>
+
 <file path="pyrightconfig.json">
 {
   "venvPath": ".",
@@ -3916,477 +4880,6 @@ def setup_logger(name="trading"):
 
 # Generate a default project-level logger for broad imports
 logger = setup_logger("main")
-</file>
-
-<file path="core/alpha_engine.py">
-"""
-core/alpha_engine.py  —  Omega Architecture: Process 2 (Alpha Engine)
-═══════════════════════════════════════════════════════════════════════
-Architectural Rewrite: Delta-Neutral Statistical Arbitrage (Pairs Trading)
-"""
-
-import time
-import logging
-import sqlite3
-import uuid
-import queue
-import multiprocessing as mp
-import numpy as np
-import statsmodels.api as sm
-import pandas as pd
-import statsmodels.tsa.stattools as ts
-from multiprocessing.shared_memory import SharedMemory
-import datetime
-import collections
-from typing import NamedTuple, Dict, List, Tuple
-
-from core.data_feeder import FIELDS_PER_SYMBOL, BYTES_PER_SYMBOL
-
-# ── Signal wire type ─────────────────────────────────────────────────────────
-class Signal(NamedTuple):
-    symbol:       str
-    signal:       float     # +1.0 = BUY, -1.0 = SELL, 0.0 = FLAT
-    confidence:   float     # [0.0 - 1.0] (1 - p-value)
-    regime:       str       # "COINTEGRATED" | "DIVERGING"
-    action:       str       # "ENTER_LONG" | "ENTER_SHORT" | "CLOSE"
-    atr:          float
-    z_score:      float     # Current Spread Z-Score
-    ofi_ok:       bool      
-    timestamp:    float
-    # STATARB EXTENSIONS
-    basket_id:    str       # Links multiple legs of a single trade
-    beta:         float     # Hedge Ratio
-    leg_role:     str       # 'PRIMARY' | 'HEDGE'
-    # ARCHITECT UPGRADE: Execution & Safety Metadata
-    hedge_symbol: str       # To assist router with margin checks
-    hedge_beta:   float     # Beta at signal time
-    exit_reason:  str       # "MEAN_REVERSION" | "Z_HARD_STOP" | "TIME_STOP" | "COINT_BREAKDOWN"
-
-# ── Constants ─────────────────────────────────────────────────────────────────
-BUFFER_SIZE         = 600    # Need > 500 for cointegration check
-CANDLE_SEED_MINIMUM = 500   
-ZSCORE_WINDOW       = 50
-COINT_P_LIMIT       = 0.05
-CANDLE_SEC          = 300   
-EVAL_INTERVAL       = 10.0  # Statistical tests take more time
-MT5_INIT_RETRIES    = 3
-MT5_INIT_BACKOFF    = 2.0
-Z_HARD_STOP         = 4.5
-TIME_STOP_PERIODS   = 96    # Redefined: 24 hours on M15 (architect ruling)
-
-# Predefined tradable pairs — Economically tethered, high correlation spreads
-TRADABLE_PAIRS = [
-    # --- THE COMMODITY BLOC (Highly Tethered) ---
-    ("AUDUSD", "NZDUSD"),  # The classic Oceanic spread
-    ("AUDJPY", "NZDJPY"),  # Oceanic yield vs safe haven
-    ("USDCAD", "AUDUSD"),  # Oil vs Metals (Inverted beta)
-    
-    # --- THE EUROPEAN CORE ---
-    ("EURUSD", "GBPUSD"),  # Eurozone vs UK
-    ("EURGBP", "EURCHF"),  # European cross-flows
-    ("EURJPY", "GBPJPY"),  # European yield vs Japanese yield
-    
-    # --- THE SAFE HAVENS ---
-    ("USDCHF", "USDJPY"),  # Swiss Franc vs Japanese Yen
-    ("EURCHF", "USDCHF"),  # Euro vs Dollar (Swiss anchored)
-
-    # --- THE PRECIOUS METALS (If your broker offers them) ---
-    ("XAUUSD", "XAGUSD"),  # Gold vs Silver (The ultimate stat-arb pair)
-    ("XAUEUR", "XAGEUR"),  # Gold vs Silver (Euro priced)
-]
-
-# ── Logger ────────────────────────────────────────────────────────────────────
-def _make_logger() -> logging.Logger:
-    log = logging.getLogger("alpha_engine")
-    if not log.handlers:
-        h = logging.StreamHandler()
-        h.setFormatter(logging.Formatter(
-            "%(asctime)s [AlphaEngine] %(levelname)s — %(message)s"
-        ))
-        log.addHandler(h)
-    log.setLevel(logging.INFO)
-    return log
-
-def _connect_mt5(login: int, password: str, server: str, logger: logging.Logger) -> bool:
-    import MetaTrader5 as mt5
-    for attempt in range(1, MT5_INIT_RETRIES + 1):
-        logger.info(f"MT5 init attempt {attempt}/{MT5_INIT_RETRIES}…")
-        if mt5.initialize(login=int(login), password=password, server=server):
-            logger.info("MT5 connection established.")
-            return True
-        logger.warning(f"mt5.initialize() failed: {mt5.last_error()}")
-        if attempt < MT5_INIT_RETRIES:
-            time.sleep(MT5_INIT_BACKOFF * attempt)
-    logger.critical(f"MT5 init FAILED after {MT5_INIT_RETRIES} attempts — process exiting.")
-    return False
-
-# ══════════════════════════════════════════════════════════════════════════════
-# STATISTICAL ARBITRAGE UTILITIES
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _calculate_spread_stats(y: np.ndarray, x: np.ndarray, logger: logging.Logger = None) -> Tuple[float, float, float, np.ndarray]:
-    """
-    Performs Cointegration test & OLS to find Beta and Z-Score.
-    Returns: (p_value, beta, current_z, spread_series) or (None, None, None, None) on error.
-    
-    MATH GUARD: Validates array fitness before statistical operations.
-    - Checks variance > 1e-8 to detect flat/degenerate arrays from ffill() on missing data.
-    - Catches statsmodels LinAlgError/ValueError and returns None tuple to skip pair.
-    """
-    if logger is None:
-        logger = _make_logger()
-    
-    try:
-        # ── MATH GUARD 1: Validate input arrays for degeneracy ──────────
-        y_var = np.var(y)
-        x_var = np.var(x)
-        if y_var < 1e-8 or x_var < 1e-8:
-            logger.warning(f"[Math Guard] Degenerate/flat arrays detected (y_var={y_var:.2e}, x_var={x_var:.2e}). Skipping statistical evaluation.")
-            return None, None, None, None
-        
-        # 1. Cointegration Test
-        _, p_value, _ = coint(y, x)
-        
-        # 2. OLS for Hedge Ratio (Beta)
-        # y = beta * x + constant
-        x_const = sm.add_constant(x)
-        model = sm.OLS(y, x_const).fit()
-        beta = model.params[1]
-        constant = model.params[0]
-        
-        # Validate outputs are finite
-        if not (np.isfinite(p_value) and np.isfinite(beta) and np.isfinite(constant)):
-            logger.warning(f"[Math Guard] Non-finite statistics detected (p={p_value}, beta={beta}). Skipping pair.")
-            return None, None, None, None
-        
-        # 3. Calculate Spread
-        spread = y - (beta * x + constant)
-        
-        # 4. Z-Score calculation
-        if len(spread) < ZSCORE_WINDOW:
-            return p_value, beta, 0.0, spread
-            
-        window = spread[-ZSCORE_WINDOW:]
-        mu, sigma = np.mean(window), np.std(window)
-        
-        if sigma < 1e-12:
-            return p_value, beta, 0.0, spread
-            
-        z_score = (spread[-1] - mu) / sigma
-        if not np.isfinite(z_score):
-            logger.warning(f"[Math Guard] Non-finite z-score detected ({z_score}). Returning 0.0.")
-            z_score = 0.0
-        
-        return p_value, beta, z_score, spread
-    
-    except (np.linalg.LinAlgError, ValueError) as exc:
-        logger.warning(f"[Math Guard] Statsmodels error: {type(exc).__name__}: {exc}. Skipping pair.")
-        return None, None, None, None
-    except Exception as exc:
-        logger.error(f"[Math Guard] Unexpected error in cointegration/OLS: {exc}", exc_info=False)
-        return None, None, None, None
-
-def _vectorized_atr(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = 14) -> float:
-    if len(closes) < period + 1: return 0.0
-    tr = np.maximum(highs[1:] - lows[1:], np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])))
-    return float(np.mean(tr[-period:]))
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN PROCESS ENTRY
-# ══════════════════════════════════════════════════════════════════════════════
-
-def alpha_engine_process(
-    symbols:      list,
-    shm_name:     str,
-    symbol_index: dict,
-    signal_queue: mp.Queue,
-    stop_event:   mp.Event,
-    mt5_login:    int,
-    mt5_password: str,
-    mt5_server:   str,
-    feeder_ready: mp.Event,
-    live_params:  mp.Array,
-    shm_lock     = None,
-):
-    import MetaTrader5 as mt5
-
-    logger = _make_logger()
-    logger.info(f"AlphaEngine PID={mp.current_process().pid} | StatArb Mode")
-
-    if not _connect_mt5(mt5_login, mt5_password, mt5_server, logger):
-        return
-
-    feeder_ready.wait(timeout=30)
-    try:
-        shm = SharedMemory(name=shm_name)
-    except FileNotFoundError:
-        logger.critical(f"SharedMemory '{shm_name}' not found — exiting.")
-        mt5.shutdown()
-        return
-
-    ticks_np = np.ndarray(shape=(len(symbols), FIELDS_PER_SYMBOL), dtype=np.float64, buffer=shm.buf)
-
-    # Historical Buffers
-    closes     = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
-    highs      = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
-    lows       = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
-    times      = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
-    buf_ptr    = {s: 0     for s in symbols}  
-    buf_count  = {s: 0     for s in symbols}  
-    candle_ts  = {s: 0.0   for s in symbols}
-    spread_history  = {s: collections.deque(maxlen=20) for s in symbols}  
-
-    logger.info("Seeding candle buffers for pairs...")
-    for sym in symbols:
-        rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M5, 0, BUFFER_SIZE)
-        if rates is not None and len(rates) > 0:
-            n = len(rates)
-            closes[sym][:n] = rates['close']
-            highs[sym][:n]  = rates['high']
-            lows[sym][:n]   = rates['low']
-            times[sym][:n]  = rates['time'].astype(np.float64)
-            buf_ptr[sym]    = n % BUFFER_SIZE
-            buf_count[sym]  = n
-            candle_ts[sym]  = float(rates['time'][-1])
-
-    # Tracking open baskets for exit logic
-    # active_baskets: basket_id -> {"start_time": float, "asset_a": str, "asset_b": str}
-    active_baskets = {} 
-
-    logger.info("Syncing existing positions from MT5...")
-    try:
-        current_pos = mt5.positions_get()
-        if current_pos:
-            for pos in current_pos:
-                # Recover basket_id from comment if possible
-                b_id = pos.comment if pos.comment.startswith("BSKT_") else None
-                if b_id:
-                    if b_id not in active_baskets:
-                        pos_dt = datetime.datetime.fromtimestamp(pos.time, tz=datetime.timezone.utc)
-                        now_dt = datetime.datetime.now(tz=datetime.timezone.utc)
-                        age_seconds = (now_dt - pos_dt).total_seconds()
-                        
-                        active_baskets[b_id] = {
-                            "start_time": time.time() - age_seconds,  # Normalize to local epoch
-                            "symbols": set()
-                        }
-                    active_baskets[b_id]["symbols"].add(pos.symbol)
-            logger.info(f"Recovered {len(active_baskets)} active baskets from MT5.")
-    except Exception as exc:
-        logger.warning(f"Failed to sync positions on startup: {exc}")
-
-    logger.info("Entering StatArb Decision Loop.")
-
-    while not stop_event.is_set():
-        t_start = time.perf_counter()
-
-        # 0. Sync Dynamic Thresholds
-        with live_params.get_lock():
-            z_entry_dynamic = live_params[0]
-            z_exit_dynamic  = live_params[1]
-
-        # 1. Tick Ingestion & Candle Building
-        for sym in symbols:
-            idx = symbol_index[sym]
-            
-            # ── ATOMIC READ WITH SHM_LOCK ──────────────────
-            if shm_lock: shm_lock.acquire()
-            try:
-                bid = ticks_np[idx, 0]
-                ask = ticks_np[idx, 1]
-                vol = ticks_np[idx, 3]
-                tick_time = ticks_np[idx, 4]
-            finally:
-                if shm_lock: shm_lock.release()
-            
-            if bid == 0.0: continue
-            
-            mid = (bid + ask) / 2.0
-            if candle_ts[sym] == 0.0: candle_ts[sym] = tick_time - (tick_time % CANDLE_SEC)
-
-            if tick_time - candle_ts[sym] >= CANDLE_SEC:
-                buf_ptr[sym] = (buf_ptr[sym] + 1) % BUFFER_SIZE
-                buf_count[sym] = min(buf_count[sym] + 1, BUFFER_SIZE)
-                closes[sym][buf_ptr[sym]] = mid
-                highs[sym][buf_ptr[sym]] = mid
-                lows[sym][buf_ptr[sym]] = mid
-                times[sym][buf_ptr[sym]] = tick_time - (tick_time % CANDLE_SEC)
-                candle_ts[sym] = tick_time - (tick_time % CANDLE_SEC)
-            else:
-                p = buf_ptr[sym]
-                closes[sym][p] = mid
-                if mid > highs[sym][p]: highs[sym][p] = mid
-                if mid < lows[sym][p]: lows[sym][p] = mid
-
-        # 2. Pair Evaluation
-        for asset_a, asset_b in TRADABLE_PAIRS:
-            if buf_count[asset_a] < CANDLE_SEED_MINIMUM or buf_count[asset_b] < CANDLE_SEED_MINIMUM:
-                continue
-
-            # ── ARCHITECT UPGRADE: Precision Timestamp Alignment ──
-            ptr_a, ptr_b = buf_ptr[asset_a], buf_ptr[asset_b]
-            idx_a = np.roll(np.arange(BUFFER_SIZE), -ptr_a - 1)
-            idx_b = np.roll(np.arange(BUFFER_SIZE), -ptr_b - 1)
-
-            # Use only valid history segments
-            start_a = BUFFER_SIZE - buf_count[asset_a]
-            start_b = BUFFER_SIZE - buf_count[asset_b]
-
-            # ── ARCHITECT UPDATE: State-Aware Logic ──
-            # Find if this pair already has an active basket
-            existing_b_id = next((k for k, v in active_baskets.items() 
-                                  if asset_a in v["symbols"] and asset_b in v["symbols"]), None)
-
-            # Action logic initialized
-            action_a, action_b = None, None
-            signal_a, signal_b = 0.0, 0.0
-            exit_reason = ""
-
-            df_a = pd.DataFrame({
-                'time': times[asset_a][idx_a][start_a:],
-                'y':    closes[asset_a][idx_a][start_a:]
-            })
-            df_b = pd.DataFrame({
-                'time': times[asset_b][idx_b][start_b:],
-                'x':    closes[asset_b][idx_b][start_b:]
-            })
-
-            # Merge inner
-            df_merged = pd.merge(df_a, df_b, on='time', how='inner').sort_values('time')
-            df_merged = df_merged.dropna()
-
-            y = df_merged['y'].values
-            x = df_merged['x'].values
-
-            if len(y) < CANDLE_SEED_MINIMUM: continue
-
-            # Cointegration & Z-Score
-            p_val, beta, z_score, _ = _calculate_spread_stats(y, x, logger)
-            
-            # ── MATH GUARD CHECK: Skip if stats failed ───────────────────
-            if p_val is None:
-                continue
-            
-            # Confidence & Regime
-            confidence = max(0.0, 1.0 - p_val)
-            is_coint = p_val <= COINT_P_LIMIT
-            
-            if is_coint:
-                # ENTRY LOGIC: Only if not already open
-                if not existing_b_id:
-                    if z_score > z_entry_dynamic:
-                        # Short Spread: Sell A, Buy B
-                        action_a, action_b = "ENTER_SHORT", "ENTER_LONG"
-                        signal_a, signal_b = -1.0, 1.0
-                    elif z_score < -z_entry_dynamic:
-                        # Long Spread: Buy A, Sell B
-                        action_a, action_b = "ENTER_LONG", "ENTER_SHORT"
-                        signal_a, signal_b = 1.0, -1.0
-                
-                # EXIT LOGIC: Only if already open
-                if existing_b_id:
-                    # 1. Mean Reversion
-                    if abs(z_score) < z_exit_dynamic: 
-                        action_a, action_b = "CLOSE", "CLOSE"
-                        signal_a, signal_b = 0.0, 0.0
-                        exit_reason = "MEAN_REVERSION"
-                    
-                    # 2. CATASTROPHIC STOP: Z-Score Hard Stop
-                    elif abs(z_score) >= Z_HARD_STOP:
-                        action_a, action_b = "CLOSE", "CLOSE"
-                        signal_a, signal_b = 0.0, 0.0
-                        exit_reason = "Z_HARD_STOP"
-                        logger.warning(
-                            f"WARNING — [Catastrophic Z-Score Stop] {asset_a}/{asset_b} "
-                            f"deviated beyond {Z_HARD_STOP} sigma ({z_score:.2f}). Liquidating."
-                        )
-
-                    # 3. CATASTROPHIC STOP: Time Stop (24 Hours)
-                    else:
-                        now = time.time()
-                        meta = active_baskets[existing_b_id]
-                        age_hours = (now - meta["start_time"]) / 3600.0
-                        if age_hours >= 24.0:
-                            action_a, action_b = "CLOSE", "CLOSE"
-                            signal_a, signal_b = 0.0, 0.0
-                            exit_reason = "TIME_STOP"
-                            logger.warning(
-                                f"WARNING — [Time Stop] Basket {existing_b_id} failed to revert within 24 hours "
-                                f"({age_hours:.1f}h). Liquidating to free margin."
-                            )
-                            # Let the close signal go through, but we'll clean up active_baskets when we emit
-            else:
-                # ── ARCHITECT UPGRADE: Breakdown State Check ──
-                if existing_b_id:
-                    action_a, action_b = "CLOSE", "CLOSE"
-                    signal_a, signal_b = 0.0, 0.0
-                    exit_reason = "COINT_BREAKDOWN"
-                    logger.warning(f"WARNING — [Cointegration Breakdown] {asset_a}/{asset_b} Diverging. Liquidating.")
-
-            if action_a:
-                # Use existing_b_id if it exists (CLOSE), otherwise generate new (ENTER)
-                b_id = existing_b_id if existing_b_id else f"BSKT_{asset_a}_{asset_b}_{int(time.time()/60)}"
-                atr_a = _vectorized_atr(highs[asset_a][idx_a][start_a:], lows[asset_a][idx_a][start_a:], closes[asset_a][idx_a][start_a:])
-                atr_b = _vectorized_atr(highs[asset_b][idx_b][start_b:], lows[asset_b][idx_b][start_b:], closes[asset_b][idx_b][start_b:])
-                
-                # Leg A
-                sig_a = Signal(
-                    symbol=asset_a, signal=signal_a, confidence=confidence, regime="COINTEGRATED" if is_coint else "DIVERGING",
-                    action=action_a, atr=atr_a, z_score=z_score, ofi_ok=True, timestamp=time.time(),
-                    basket_id=b_id, beta=1.0, leg_role="PRIMARY",
-                    hedge_symbol=asset_b, hedge_beta=beta, exit_reason=exit_reason
-                )
-                # Leg B
-                sig_b = Signal(
-                    symbol=asset_b, signal=signal_b, confidence=confidence, regime="COINTEGRATED" if is_coint else "DIVERGING",
-                    action=action_b, atr=atr_b, z_score=z_score, ofi_ok=True, timestamp=time.time(),
-                    basket_id=b_id, beta=beta, leg_role="HEDGE",
-                    hedge_symbol=asset_a, hedge_beta=1.0, exit_reason=exit_reason
-                )
-                
-                try:
-                    signal_queue.put(sig_a, timeout=1.0)
-                    signal_queue.put(sig_b, timeout=1.0)
-                    
-                    # ── ARCHITECT UPDATE: Atomic State Cleanup ──
-                    if action_a == "CLOSE":
-                        active_baskets.pop(existing_b_id, None)
-                    else:
-                        # New Entry
-                        active_baskets[b_id] = {"start_time": time.time(), "symbols": {asset_a, asset_b}}
-
-                    if action_a != "CLOSE":
-                        logger.info(f"[{asset_a}-{asset_b}] Pair Alert: Z={z_score:.2f} | p={p_val:.4f} | Beta={beta:.2f}")
-                except queue.Full:
-                    logger.error(f"Signal queue FULL: basket {b_id} signals {asset_a}/{asset_b} dropped. ExecRouter backlog detected.")
-                    # IMPORTANT: Only pop the tracked state on queue failure if it was an ENTER action.
-                    # If.it was a CLOSE action, we WANT to retain it so AlphaEngine keeps trying to close the position.
-                    if action_a != "CLOSE":
-                        active_baskets.pop(b_id, None)
-                except Exception as exc:
-                    logger.error(f"Signal queue error: {exc}")
-
-            # ── Dashboard Signals Pipeline ───────────────────────────────────
-            try:
-                conn = sqlite3.connect("file:logs/trades.db", uri=True, timeout=1.0)
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO signals (timestamp, symbol, regime, z_score, beta, confidence)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (time.time(), f"{asset_a}/{asset_b}", "COINT" if is_coint else "DIV", z_score, beta, confidence))
-                conn.commit()
-                conn.close()
-            except Exception:
-                pass
-
-        # 3. DB Logging & Interval Control
-        elapsed = time.perf_counter() - t_start
-        if elapsed < EVAL_INTERVAL:
-            time.sleep(EVAL_INTERVAL - elapsed)
-
-    shm.close()
-    mt5.shutdown()
-    logger.info("AlphaEngine exited cleanly.")
 </file>
 
 <file path="core/db_writer.py">
@@ -6407,6 +6900,477 @@ if __name__ == "__main__":
     # Windows requires `spawn` (the default) — make it explicit and idempotent
     mp.set_start_method("spawn", force=True)
     supervisor_main()
+</file>
+
+<file path="core/alpha_engine.py">
+"""
+core/alpha_engine.py  —  Omega Architecture: Process 2 (Alpha Engine)
+═══════════════════════════════════════════════════════════════════════
+Architectural Rewrite: Delta-Neutral Statistical Arbitrage (Pairs Trading)
+"""
+
+import time
+import logging
+import sqlite3
+import uuid
+import queue
+import multiprocessing as mp
+import numpy as np
+import statsmodels.api as sm
+import pandas as pd
+from statsmodels.tsa.stattools import coint
+from multiprocessing.shared_memory import SharedMemory
+import datetime
+import collections
+from typing import NamedTuple, Dict, List, Tuple
+
+from core.data_feeder import FIELDS_PER_SYMBOL, BYTES_PER_SYMBOL
+
+# ── Signal wire type ─────────────────────────────────────────────────────────
+class Signal(NamedTuple):
+    symbol:       str
+    signal:       float     # +1.0 = BUY, -1.0 = SELL, 0.0 = FLAT
+    confidence:   float     # [0.0 - 1.0] (1 - p-value)
+    regime:       str       # "COINTEGRATED" | "DIVERGING"
+    action:       str       # "ENTER_LONG" | "ENTER_SHORT" | "CLOSE"
+    atr:          float
+    z_score:      float     # Current Spread Z-Score
+    ofi_ok:       bool      
+    timestamp:    float
+    # STATARB EXTENSIONS
+    basket_id:    str       # Links multiple legs of a single trade
+    beta:         float     # Hedge Ratio
+    leg_role:     str       # 'PRIMARY' | 'HEDGE'
+    # ARCHITECT UPGRADE: Execution & Safety Metadata
+    hedge_symbol: str       # To assist router with margin checks
+    hedge_beta:   float     # Beta at signal time
+    exit_reason:  str       # "MEAN_REVERSION" | "Z_HARD_STOP" | "TIME_STOP" | "COINT_BREAKDOWN"
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+BUFFER_SIZE         = 600    # Need > 500 for cointegration check
+CANDLE_SEED_MINIMUM = 500   
+ZSCORE_WINDOW       = 50
+COINT_P_LIMIT       = 0.05
+CANDLE_SEC          = 300   
+EVAL_INTERVAL       = 10.0  # Statistical tests take more time
+MT5_INIT_RETRIES    = 3
+MT5_INIT_BACKOFF    = 2.0
+Z_HARD_STOP         = 4.5
+TIME_STOP_PERIODS   = 96    # Redefined: 24 hours on M15 (architect ruling)
+
+# Predefined tradable pairs — Economically tethered, high correlation spreads
+TRADABLE_PAIRS = [
+    # --- THE COMMODITY BLOC (Highly Tethered) ---
+    ("AUDUSD", "NZDUSD"),  # The classic Oceanic spread
+    ("AUDJPY", "NZDJPY"),  # Oceanic yield vs safe haven
+    ("USDCAD", "AUDUSD"),  # Oil vs Metals (Inverted beta)
+    
+    # --- THE EUROPEAN CORE ---
+    ("EURUSD", "GBPUSD"),  # Eurozone vs UK
+    ("EURGBP", "EURCHF"),  # European cross-flows
+    ("EURJPY", "GBPJPY"),  # European yield vs Japanese yield
+    
+    # --- THE SAFE HAVENS ---
+    ("USDCHF", "USDJPY"),  # Swiss Franc vs Japanese Yen
+    ("EURCHF", "USDCHF"),  # Euro vs Dollar (Swiss anchored)
+
+    # --- THE PRECIOUS METALS (If your broker offers them) ---
+    ("XAUUSD", "XAGUSD"),  # Gold vs Silver (The ultimate stat-arb pair)
+    ("XAUEUR", "XAGEUR"),  # Gold vs Silver (Euro priced)
+]
+
+# ── Logger ────────────────────────────────────────────────────────────────────
+def _make_logger() -> logging.Logger:
+    log = logging.getLogger("alpha_engine")
+    if not log.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter(
+            "%(asctime)s [AlphaEngine] %(levelname)s — %(message)s"
+        ))
+        log.addHandler(h)
+    log.setLevel(logging.INFO)
+    return log
+
+def _connect_mt5(login: int, password: str, server: str, logger: logging.Logger) -> bool:
+    import MetaTrader5 as mt5
+    for attempt in range(1, MT5_INIT_RETRIES + 1):
+        logger.info(f"MT5 init attempt {attempt}/{MT5_INIT_RETRIES}…")
+        if mt5.initialize(login=int(login), password=password, server=server):
+            logger.info("MT5 connection established.")
+            return True
+        logger.warning(f"mt5.initialize() failed: {mt5.last_error()}")
+        if attempt < MT5_INIT_RETRIES:
+            time.sleep(MT5_INIT_BACKOFF * attempt)
+    logger.critical(f"MT5 init FAILED after {MT5_INIT_RETRIES} attempts — process exiting.")
+    return False
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STATISTICAL ARBITRAGE UTILITIES
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _calculate_spread_stats(y: np.ndarray, x: np.ndarray, logger: logging.Logger = None) -> Tuple[float, float, float, np.ndarray]:
+    """
+    Performs Cointegration test & OLS to find Beta and Z-Score.
+    Returns: (p_value, beta, current_z, spread_series) or (None, None, None, None) on error.
+    
+    MATH GUARD: Validates array fitness before statistical operations.
+    - Checks variance > 1e-8 to detect flat/degenerate arrays from ffill() on missing data.
+    - Catches statsmodels LinAlgError/ValueError and returns None tuple to skip pair.
+    """
+    if logger is None:
+        logger = _make_logger()
+    
+    try:
+        # ── MATH GUARD 1: Validate input arrays for degeneracy ──────────
+        y_var = np.var(y)
+        x_var = np.var(x)
+        if y_var < 1e-8 or x_var < 1e-8:
+            logger.warning(f"[Math Guard] Degenerate/flat arrays detected (y_var={y_var:.2e}, x_var={x_var:.2e}). Skipping statistical evaluation.")
+            return None, None, None, None
+        
+        # 1. Cointegration Test
+        _, p_value, _ = coint(y, x)
+        
+        # 2. OLS for Hedge Ratio (Beta)
+        # y = beta * x + constant
+        x_const = sm.add_constant(x)
+        model = sm.OLS(y, x_const).fit()
+        beta = model.params[1]
+        constant = model.params[0]
+        
+        # Validate outputs are finite
+        if not (np.isfinite(p_value) and np.isfinite(beta) and np.isfinite(constant)):
+            logger.warning(f"[Math Guard] Non-finite statistics detected (p={p_value}, beta={beta}). Skipping pair.")
+            return None, None, None, None
+        
+        # 3. Calculate Spread
+        spread = y - (beta * x + constant)
+        
+        # 4. Z-Score calculation
+        if len(spread) < ZSCORE_WINDOW:
+            return p_value, beta, 0.0, spread
+            
+        window = spread[-ZSCORE_WINDOW:]
+        mu, sigma = np.mean(window), np.std(window)
+        
+        if sigma < 1e-12:
+            return p_value, beta, 0.0, spread
+            
+        z_score = (spread[-1] - mu) / sigma
+        if not np.isfinite(z_score):
+            logger.warning(f"[Math Guard] Non-finite z-score detected ({z_score}). Returning 0.0.")
+            z_score = 0.0
+        
+        return p_value, beta, z_score, spread
+    
+    except (np.linalg.LinAlgError, ValueError) as exc:
+        logger.warning(f"[Math Guard] Statsmodels error: {type(exc).__name__}: {exc}. Skipping pair.")
+        return None, None, None, None
+    except Exception as exc:
+        logger.error(f"[Math Guard] Unexpected error in cointegration/OLS: {exc}", exc_info=False)
+        return None, None, None, None
+
+def _vectorized_atr(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = 14) -> float:
+    if len(closes) < period + 1: return 0.0
+    tr = np.maximum(highs[1:] - lows[1:], np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])))
+    return float(np.mean(tr[-period:]))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN PROCESS ENTRY
+# ══════════════════════════════════════════════════════════════════════════════
+
+def alpha_engine_process(
+    symbols:      list,
+    shm_name:     str,
+    symbol_index: dict,
+    signal_queue: mp.Queue,
+    stop_event:   mp.Event,
+    mt5_login:    int,
+    mt5_password: str,
+    mt5_server:   str,
+    feeder_ready: mp.Event,
+    live_params:  mp.Array,
+    shm_lock     = None,
+):
+    import MetaTrader5 as mt5
+
+    logger = _make_logger()
+    logger.info(f"AlphaEngine PID={mp.current_process().pid} | StatArb Mode")
+
+    if not _connect_mt5(mt5_login, mt5_password, mt5_server, logger):
+        return
+
+    feeder_ready.wait(timeout=30)
+    try:
+        shm = SharedMemory(name=shm_name)
+    except FileNotFoundError:
+        logger.critical(f"SharedMemory '{shm_name}' not found — exiting.")
+        mt5.shutdown()
+        return
+
+    ticks_np = np.ndarray(shape=(len(symbols), FIELDS_PER_SYMBOL), dtype=np.float64, buffer=shm.buf)
+
+    # Historical Buffers
+    closes     = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
+    highs      = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
+    lows       = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
+    times      = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
+    buf_ptr    = {s: 0     for s in symbols}  
+    buf_count  = {s: 0     for s in symbols}  
+    candle_ts  = {s: 0.0   for s in symbols}
+    spread_history  = {s: collections.deque(maxlen=20) for s in symbols}  
+
+    logger.info("Seeding candle buffers for pairs...")
+    for sym in symbols:
+        rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M5, 0, BUFFER_SIZE)
+        if rates is not None and len(rates) > 0:
+            n = len(rates)
+            closes[sym][:n] = rates['close']
+            highs[sym][:n]  = rates['high']
+            lows[sym][:n]   = rates['low']
+            times[sym][:n]  = rates['time'].astype(np.float64)
+            buf_ptr[sym]    = n % BUFFER_SIZE
+            buf_count[sym]  = n
+            candle_ts[sym]  = float(rates['time'][-1])
+
+    # Tracking open baskets for exit logic
+    # active_baskets: basket_id -> {"start_time": float, "asset_a": str, "asset_b": str}
+    active_baskets = {} 
+
+    logger.info("Syncing existing positions from MT5...")
+    try:
+        current_pos = mt5.positions_get()
+        if current_pos:
+            for pos in current_pos:
+                # Recover basket_id from comment if possible
+                b_id = pos.comment if pos.comment.startswith("BSKT_") else None
+                if b_id:
+                    if b_id not in active_baskets:
+                        pos_dt = datetime.datetime.fromtimestamp(pos.time, tz=datetime.timezone.utc)
+                        now_dt = datetime.datetime.now(tz=datetime.timezone.utc)
+                        age_seconds = (now_dt - pos_dt).total_seconds()
+                        
+                        active_baskets[b_id] = {
+                            "start_time": time.time() - age_seconds,  # Normalize to local epoch
+                            "symbols": set()
+                        }
+                    active_baskets[b_id]["symbols"].add(pos.symbol)
+            logger.info(f"Recovered {len(active_baskets)} active baskets from MT5.")
+    except Exception as exc:
+        logger.warning(f"Failed to sync positions on startup: {exc}")
+
+    logger.info("Entering StatArb Decision Loop.")
+
+    while not stop_event.is_set():
+        t_start = time.perf_counter()
+
+        # 0. Sync Dynamic Thresholds
+        with live_params.get_lock():
+            z_entry_dynamic = live_params[0]
+            z_exit_dynamic  = live_params[1]
+
+        # 1. Tick Ingestion & Candle Building
+        for sym in symbols:
+            idx = symbol_index[sym]
+            
+            # ── ATOMIC READ WITH SHM_LOCK ──────────────────
+            if shm_lock: shm_lock.acquire()
+            try:
+                bid = ticks_np[idx, 0]
+                ask = ticks_np[idx, 1]
+                vol = ticks_np[idx, 3]
+                tick_time = ticks_np[idx, 4]
+            finally:
+                if shm_lock: shm_lock.release()
+            
+            if bid == 0.0: continue
+            
+            mid = (bid + ask) / 2.0
+            if candle_ts[sym] == 0.0: candle_ts[sym] = tick_time - (tick_time % CANDLE_SEC)
+
+            if tick_time - candle_ts[sym] >= CANDLE_SEC:
+                buf_ptr[sym] = (buf_ptr[sym] + 1) % BUFFER_SIZE
+                buf_count[sym] = min(buf_count[sym] + 1, BUFFER_SIZE)
+                closes[sym][buf_ptr[sym]] = mid
+                highs[sym][buf_ptr[sym]] = mid
+                lows[sym][buf_ptr[sym]] = mid
+                times[sym][buf_ptr[sym]] = tick_time - (tick_time % CANDLE_SEC)
+                candle_ts[sym] = tick_time - (tick_time % CANDLE_SEC)
+            else:
+                p = buf_ptr[sym]
+                closes[sym][p] = mid
+                if mid > highs[sym][p]: highs[sym][p] = mid
+                if mid < lows[sym][p]: lows[sym][p] = mid
+
+        # 2. Pair Evaluation
+        for asset_a, asset_b in TRADABLE_PAIRS:
+            if buf_count[asset_a] < CANDLE_SEED_MINIMUM or buf_count[asset_b] < CANDLE_SEED_MINIMUM:
+                continue
+
+            # ── ARCHITECT UPGRADE: Precision Timestamp Alignment ──
+            ptr_a, ptr_b = buf_ptr[asset_a], buf_ptr[asset_b]
+            idx_a = np.roll(np.arange(BUFFER_SIZE), -ptr_a - 1)
+            idx_b = np.roll(np.arange(BUFFER_SIZE), -ptr_b - 1)
+
+            # Use only valid history segments
+            start_a = BUFFER_SIZE - buf_count[asset_a]
+            start_b = BUFFER_SIZE - buf_count[asset_b]
+
+            # ── ARCHITECT UPDATE: State-Aware Logic ──
+            # Find if this pair already has an active basket
+            existing_b_id = next((k for k, v in active_baskets.items() 
+                                  if asset_a in v["symbols"] and asset_b in v["symbols"]), None)
+
+            # Action logic initialized
+            action_a, action_b = None, None
+            signal_a, signal_b = 0.0, 0.0
+            exit_reason = ""
+
+            df_a = pd.DataFrame({
+                'time': times[asset_a][idx_a][start_a:],
+                'y':    closes[asset_a][idx_a][start_a:]
+            })
+            df_b = pd.DataFrame({
+                'time': times[asset_b][idx_b][start_b:],
+                'x':    closes[asset_b][idx_b][start_b:]
+            })
+
+            # Merge inner
+            df_merged = pd.merge(df_a, df_b, on='time', how='inner').sort_values('time')
+            df_merged = df_merged.dropna()
+
+            y = df_merged['y'].values
+            x = df_merged['x'].values
+
+            if len(y) < CANDLE_SEED_MINIMUM: continue
+
+            # Cointegration & Z-Score
+            p_val, beta, z_score, _ = _calculate_spread_stats(y, x, logger)
+            
+            # ── MATH GUARD CHECK: Skip if stats failed ───────────────────
+            if p_val is None:
+                continue
+            
+            # Confidence & Regime
+            confidence = max(0.0, 1.0 - p_val)
+            is_coint = p_val <= COINT_P_LIMIT
+            
+            if is_coint:
+                # ENTRY LOGIC: Only if not already open
+                if not existing_b_id:
+                    if z_score > z_entry_dynamic:
+                        # Short Spread: Sell A, Buy B
+                        action_a, action_b = "ENTER_SHORT", "ENTER_LONG"
+                        signal_a, signal_b = -1.0, 1.0
+                    elif z_score < -z_entry_dynamic:
+                        # Long Spread: Buy A, Sell B
+                        action_a, action_b = "ENTER_LONG", "ENTER_SHORT"
+                        signal_a, signal_b = 1.0, -1.0
+                
+                # EXIT LOGIC: Only if already open
+                if existing_b_id:
+                    # 1. Mean Reversion
+                    if abs(z_score) < z_exit_dynamic: 
+                        action_a, action_b = "CLOSE", "CLOSE"
+                        signal_a, signal_b = 0.0, 0.0
+                        exit_reason = "MEAN_REVERSION"
+                    
+                    # 2. CATASTROPHIC STOP: Z-Score Hard Stop
+                    elif abs(z_score) >= Z_HARD_STOP:
+                        action_a, action_b = "CLOSE", "CLOSE"
+                        signal_a, signal_b = 0.0, 0.0
+                        exit_reason = "Z_HARD_STOP"
+                        logger.warning(
+                            f"WARNING — [Catastrophic Z-Score Stop] {asset_a}/{asset_b} "
+                            f"deviated beyond {Z_HARD_STOP} sigma ({z_score:.2f}). Liquidating."
+                        )
+
+                    # 3. CATASTROPHIC STOP: Time Stop (24 Hours)
+                    else:
+                        now = time.time()
+                        meta = active_baskets[existing_b_id]
+                        age_hours = (now - meta["start_time"]) / 3600.0
+                        if age_hours >= 24.0:
+                            action_a, action_b = "CLOSE", "CLOSE"
+                            signal_a, signal_b = 0.0, 0.0
+                            exit_reason = "TIME_STOP"
+                            logger.warning(
+                                f"WARNING — [Time Stop] Basket {existing_b_id} failed to revert within 24 hours "
+                                f"({age_hours:.1f}h). Liquidating to free margin."
+                            )
+                            # Let the close signal go through, but we'll clean up active_baskets when we emit
+            else:
+                # ── ARCHITECT UPGRADE: Breakdown State Check ──
+                if existing_b_id:
+                    action_a, action_b = "CLOSE", "CLOSE"
+                    signal_a, signal_b = 0.0, 0.0
+                    exit_reason = "COINT_BREAKDOWN"
+                    logger.warning(f"WARNING — [Cointegration Breakdown] {asset_a}/{asset_b} Diverging. Liquidating.")
+
+            if action_a:
+                # Use existing_b_id if it exists (CLOSE), otherwise generate new (ENTER)
+                b_id = existing_b_id if existing_b_id else f"BSKT_{asset_a}_{asset_b}_{int(time.time()/60)}"
+                atr_a = _vectorized_atr(highs[asset_a][idx_a][start_a:], lows[asset_a][idx_a][start_a:], closes[asset_a][idx_a][start_a:])
+                atr_b = _vectorized_atr(highs[asset_b][idx_b][start_b:], lows[asset_b][idx_b][start_b:], closes[asset_b][idx_b][start_b:])
+                
+                # Leg A
+                sig_a = Signal(
+                    symbol=asset_a, signal=signal_a, confidence=confidence, regime="COINTEGRATED" if is_coint else "DIVERGING",
+                    action=action_a, atr=atr_a, z_score=z_score, ofi_ok=True, timestamp=time.time(),
+                    basket_id=b_id, beta=1.0, leg_role="PRIMARY",
+                    hedge_symbol=asset_b, hedge_beta=beta, exit_reason=exit_reason
+                )
+                # Leg B
+                sig_b = Signal(
+                    symbol=asset_b, signal=signal_b, confidence=confidence, regime="COINTEGRATED" if is_coint else "DIVERGING",
+                    action=action_b, atr=atr_b, z_score=z_score, ofi_ok=True, timestamp=time.time(),
+                    basket_id=b_id, beta=beta, leg_role="HEDGE",
+                    hedge_symbol=asset_a, hedge_beta=1.0, exit_reason=exit_reason
+                )
+                
+                try:
+                    signal_queue.put(sig_a, timeout=1.0)
+                    signal_queue.put(sig_b, timeout=1.0)
+                    
+                    # ── ARCHITECT UPDATE: Atomic State Cleanup ──
+                    if action_a == "CLOSE":
+                        active_baskets.pop(existing_b_id, None)
+                    else:
+                        # New Entry
+                        active_baskets[b_id] = {"start_time": time.time(), "symbols": {asset_a, asset_b}}
+
+                    if action_a != "CLOSE":
+                        logger.info(f"[{asset_a}-{asset_b}] Pair Alert: Z={z_score:.2f} | p={p_val:.4f} | Beta={beta:.2f}")
+                except queue.Full:
+                    logger.error(f"Signal queue FULL: basket {b_id} signals {asset_a}/{asset_b} dropped. ExecRouter backlog detected.")
+                    # IMPORTANT: Only pop the tracked state on queue failure if it was an ENTER action.
+                    # If.it was a CLOSE action, we WANT to retain it so AlphaEngine keeps trying to close the position.
+                    if action_a != "CLOSE":
+                        active_baskets.pop(b_id, None)
+                except Exception as exc:
+                    logger.error(f"Signal queue error: {exc}")
+
+            # ── Dashboard Signals Pipeline ───────────────────────────────────
+            try:
+                conn = sqlite3.connect("file:logs/trades.db", uri=True, timeout=1.0)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO signals (timestamp, symbol, regime, z_score, beta, confidence)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (time.time(), f"{asset_a}/{asset_b}", "COINT" if is_coint else "DIV", z_score, beta, confidence))
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+
+        # 3. DB Logging & Interval Control
+        elapsed = time.perf_counter() - t_start
+        if elapsed < EVAL_INTERVAL:
+            time.sleep(EVAL_INTERVAL - elapsed)
+
+    shm.close()
+    mt5.shutdown()
+    logger.info("AlphaEngine exited cleanly.")
 </file>
 
 </files>

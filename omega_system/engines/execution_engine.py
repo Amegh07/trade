@@ -1,9 +1,13 @@
 import asyncio
 import logging
+import random
+import MetaTrader5 as mt5
+from typing import Tuple, List
 from omega_system.core.types import Signal, OrderStatus
 from omega_system.engines.state_engine import StateEngine
 from omega_system.core.message_bus import MessageBus
-from omega_system.adapters.mt5_client import MT5Client  # Your raw MT5 wrapper
+from omega_system.adapters.mt5_client import MT5Client
+from omega_system.config.settings import settings
 
 logger = logging.getLogger("ExecutionEngine")
 
@@ -12,57 +16,138 @@ class ExecutionEngine:
         self.state = state_engine
         self.bus = message_bus
         self.mt5 = mt5_client
+        self.spread_threshold = settings.MAX_SPREAD_POINTS
+        self.vwap_threshold = settings.VWAP_LOT_THRESHOLD
 
     async def start_worker(self):
         """Continuously listens for approved trades."""
-        logger.info("[ExecutionEngine] Armed and listening for approved signals...")
+        logger.info("[ExecutionEngine] Smart VWAP Router Armed and listening...")
         while True:
             signal: Signal = await self.bus.approved_signal_queue.get()
             await self._execute_atomic_basket(signal)
             self.bus.approved_signal_queue.task_done()
 
+    def _check_spread(self, symbol: str) -> bool:
+        """Fetches live spread in points, enforcing pre-trade liquidity gates."""
+        tick = mt5.symbol_info_tick(symbol)
+        info = mt5.symbol_info(symbol)
+        if not tick or not info:
+            logger.error(f"[SPREAD GUARD] Could not fetch tick/info for {symbol}")
+            return False
+            
+        spread_points = (tick.ask - tick.bid) / info.point
+        if spread_points > self.spread_threshold:
+            logger.warning(f"[SPREAD GUARD] {symbol} spread {spread_points:.1f} exceeds max {self.spread_threshold} pts.")
+            return False
+            
+        return True
+
+    async def _execute_smart_order(self, symbol: str, action: str, total_lot: float) -> Tuple[float, List[int], float]:
+        """
+        Executes a trade using VWAP Slicing logic.
+        Returns (average_fill_price, list_of_tickets, total_filled_lot).
+        """
+        slices = []
+        if total_lot <= self.vwap_threshold:
+            slices.append(total_lot)
+        else:
+            remaining = total_lot
+            while remaining >= 0.01:
+                chunk = round(min(1.0, remaining), 2)
+                slices.append(chunk)
+                remaining -= chunk
+
+        tickets = []
+        filled_lot = 0.0
+
+        for idx, chunk in enumerate(slices):
+            logger.info(f"[_execute_smart_order] {symbol} Route {idx+1}/{len(slices)} -> {chunk} lots")
+            ticket = await self.mt5.market_order(symbol, action, chunk)
+            
+            if not ticket:
+                logger.error(f"[_execute_smart_order] {symbol} slice {idx+1} FAILED. Liquidity dried.")
+                break
+                
+            tickets.append(ticket)
+            filled_lot += chunk
+            
+            if idx < len(slices) - 1:
+                # Absorb liquidity dynamically
+                await asyncio.sleep(random.uniform(0.1, 0.5))
+                
+        # Pseudo average fill calculation (A real implementation would log actual Deal prices natively)
+        avg_fill = 1.0 
+        return avg_fill, tickets, filled_lot
+
+    async def _rollback_tickets(self, symbol: str, tickets: List[int]) -> bool:
+        """Helper to cleanly close out a list of partially filled VWAP slice tickets."""
+        success = True
+        for tk in tickets:
+            res = await self.mt5.close_position_by_ticket(symbol, tk)
+            if not res:
+                success = False
+        return success
+
     async def _execute_atomic_basket(self, sig: Signal):
-        """The core atomic sequence: Register -> Leg A -> Leg B -> Rollback on failure."""
+        """The core atomic sequence: Pre-Check -> Register -> Leg A -> Leg B -> Rollback."""
         b_id = sig.basket_id
+        
+        # PRE-TRADE SPREAD CHECK
+        spread_a_ok = await asyncio.to_thread(self._check_spread, sig.asset_a)
+        spread_b_ok = await asyncio.to_thread(self._check_spread, sig.asset_b)
+        
+        if not spread_a_ok or not spread_b_ok:
+            logger.warning(f"[{b_id}] Spread check failed. Aborting execution.")
+            return
         
         # STEP 1: Reserve state as PENDING (Failsafe)
         registered = await self.state.register_pending_basket(
-            b_id, sig.asset_a, 1.0, sig.asset_b, sig.beta, sig.confidence
+            b_id, sig.asset_a, sig.target_lot, sig.asset_b, sig.target_lot * sig.beta, sig.confidence, sig.regime
         )
         if not registered:
-            return # State engine rejected it (e.g., already exists)
+            return 
 
         try:
             # STEP 2: Execute PRIMARY Leg A
-            logger.info(f"[{b_id}] Executing Leg A: {sig.asset_a}")
-            leg_a_ticket = await self.mt5.market_order(sig.asset_a, "ENTER", 1.0)
+            logger.info(f"[{b_id}] Executing Leg A: {sig.asset_a} ({sig.target_lot} Lots)")
+            avg_price_a, leg_a_tickets, filled_a = await self._execute_smart_order(sig.asset_a, "ENTER", sig.target_lot)
             
-            if not leg_a_ticket:
-                logger.error(f"[{b_id}] Leg A FAILED. Aborting basket.")
-                await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Leg A rejected by broker")
+            # Partial Fill Resolution
+            if filled_a < sig.target_lot:
+                logger.error(f"[{b_id}] Leg A PARTIAL FILL ({filled_a}/{sig.target_lot}). Initiating immediate rollback.")
+                if leg_a_tickets:
+                    await self._rollback_tickets(sig.asset_a, leg_a_tickets)
+                await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Leg A Partial Fill Rollback")
                 return
             
-            await self.state.update_leg_fill(b_id, "PRIMARY", leg_a_ticket, 1.0)
+            # Store master ticket
+            await self.state.update_leg_fill(b_id, "PRIMARY", leg_a_tickets[0], filled_a) 
 
             # STEP 3: Execute HEDGE Leg B
-            logger.info(f"[{b_id}] Executing Leg B: {sig.asset_b}")
-            leg_b_ticket = await self.mt5.market_order(sig.asset_b, "ENTER", sig.beta)
+            target_b = round(sig.target_lot * sig.beta, 2)
+            logger.info(f"[{b_id}] Executing Leg B: {sig.asset_b} ({target_b} Lots)")
+            avg_price_b, leg_b_tickets, filled_b = await self._execute_smart_order(sig.asset_b, "ENTER", target_b)
 
-            if not leg_b_ticket:
-                logger.critical(f"[{b_id}] Leg B FAILED. Initiating ATOMIC ROLLBACK on Leg A.")
-                # ROLLBACK LEG A
-                rollback_success = await self.mt5.close_position_by_ticket(sig.asset_a, leg_a_ticket)
-                if not rollback_success:
-                    logger.error(f"[{b_id}] ⚠️ ROLLBACK FAILED! Unhedged exposure exists on {sig.asset_a}!")
+            if filled_b < target_b:
+                logger.critical(f"[{b_id}] Leg B FAILED or PARTIAL ({filled_b}/{target_b}). Initiating ATOMIC ROLLBACK.")
                 
-                await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Leg B failed, Leg A rolled back")
+                # ROLLBACK LEG B PARTIALS
+                if leg_b_tickets:
+                    await self._rollback_tickets(sig.asset_b, leg_b_tickets)
+                    
+                # ROLLBACK LEG A
+                rollback_success = await self._rollback_tickets(sig.asset_a, leg_a_tickets)
+                if not rollback_success:
+                    logger.error(f"[{b_id}] ⚠️ FATAL ROLLBACK FAILURE! Unhedged exposure exists on {sig.asset_a}!")
+                
+                await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Leg B failed, basket rolled back")
                 return
 
-            await self.state.update_leg_fill(b_id, "HEDGE", leg_b_ticket, sig.beta)
+            await self.state.update_leg_fill(b_id, "HEDGE", leg_b_tickets[0], filled_b)
 
             # STEP 4: Both legs succeeded. Mark OPEN.
             await self.state.transition_basket_state(b_id, OrderStatus.OPEN)
-            logger.info(f"[{b_id}] Basket execution complete. Fully hedged.")
+            logger.info(f"[{b_id}] Basket execution complete. Fully hedged via Smart Routing.")
 
         except Exception as e:
             logger.critical(f"[{b_id}] Fatal execution exception: {e}")

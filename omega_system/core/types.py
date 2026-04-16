@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from enum import Enum
 import time
 
@@ -17,7 +17,18 @@ class Tick:
     ask: float
     last: float
     volume: float
-    time: float
+    regime: str = "UNKNOWN"
+
+@dataclass
+class CandleSnapshot:
+    symbol: str
+    timeframe: str
+    rates: Any
+
+@dataclass
+class ParamUpdate:
+    z_entry: float
+    z_exit: float
 
 @dataclass
 class Signal:
@@ -27,6 +38,8 @@ class Signal:
     action: str  # "ENTER" or "CLOSE"
     beta: float
     confidence: float
+    regime: str = "UNKNOWN"
+    target_lot: float = 1.0
     timestamp: float = field(default_factory=time.time)
 
 @dataclass
@@ -46,3 +59,4 @@ class BasketState:
     entry_time: float
     z_score_entry: float
     error_msg: Optional[str] = None
+    regime: str = "UNKNOWN"

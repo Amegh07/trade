@@ -8,11 +8,12 @@ logger = logging.getLogger("RiskEngine")
 
 class RiskEngine:
     def __init__(self, message_bus: MessageBus, state_engine: StateEngine):
+        from omega_system.config.settings import settings
         self.bus = message_bus
         self.state = state_engine
         
-        # Failsafe Limits
-        self.max_daily_loss = -2000.0  # Hard stop limit
+        # Failsafe Limits driven by universe configuration
+        self.max_daily_loss = settings.MAX_DAILY_LOSS_USD  # Centralized hard stop
         self.current_daily_pnl = 0.0   # Would be synced from DB on boot
 
     async def start_worker(self):
@@ -31,12 +32,26 @@ class RiskEngine:
             logger.critical(f"[{b_id}] BLOCKED: Max daily loss breached. System halted.")
             return
 
-        # RULE 2: The Mathematical Edge (CRITICAL-5 FIX)
-        # If the expected value (confidence/Kelly) is 0 or negative, DO NOT TRADE.
-        if sig.confidence <= 0.0:
-            logger.warning(f"[{b_id}] GHOST MODE: Negative edge detected (Kelly <= 0). Signal discarded.")
+        # RULE 2: The Mathematical Edge (CRITICAL-5 FIX) + L2 Regime Overrides
+        REGIME_MULTIPLIER = {
+            "RANGING": 1.0,  # Full StatArb resonance
+            "TRENDING": 0.0, # StatArb fails in pure trends, hard veto
+            "VOLATILE": 0.3, # Chop zone whip-saw risk, slash sizing by 70%
+            "DEAD": 0.0,     # Slippage hazard inside flat variance, hard veto
+            "UNKNOWN": 0.0
+        }
+        
+        reg_mult = REGIME_MULTIPLIER.get(sig.regime, 0.0)
+        final_risk = sig.confidence * reg_mult
+
+        if final_risk <= 0.0:
+            logger.warning(f"[{b_id}] BLOCKED: Regime is {sig.regime}. Signal discarded.")
             return
 
+        # Sizing algorithm: Convert expected edge array into fractional Lot output limits
+        # Here we translate the static 1.0 lot constraint to conform to the regime multiplier
+        sig.target_lot = max(0.01, round(1.0 * reg_mult, 2))
+        
         # RULE 3: Exposure Limits
         snapshot = await self.state.get_snapshot()
         if b_id in snapshot:

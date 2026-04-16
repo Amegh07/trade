@@ -7,9 +7,12 @@ logger = logging.getLogger("MessageBus")
 class MessageBus:
     def __init__(self):
         # Async queues for inter-engine communication
-        self.tick_queue = asyncio.Queue()            # DataEngine -> AlphaEngine / RiskEngine
+        self.raw_tick_queue = asyncio.Queue()        # DataEngine -> MarketStateEngine
+        self.regime_tick_queue = asyncio.Queue()     # MarketStateEngine -> AlphaEngine
+        self.candle_queue = asyncio.Queue()          # DataEngine -> Alpha/MarketState (Candles)
         self.raw_signal_queue = asyncio.Queue()      # AlphaEngine -> RiskEngine
         self.approved_signal_queue = asyncio.Queue() # RiskEngine -> ExecutionEngine
+        self.param_update_queue = asyncio.Queue()    # ShadowEngine -> AlphaEngine
         
     async def publish_signal(self, signal: Any) -> None:
         """Alpha Engine uses this to broadcast a signal."""

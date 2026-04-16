@@ -16,7 +16,10 @@ class TradesRepo:
                 pnl REAL,
                 timestamp REAL,
                 type INTEGER,
-                basket_id TEXT
+                basket_id TEXT,
+                regime TEXT,
+                z_entry_used REAL,
+                execution_latency_ms REAL
             )
         """)
 
@@ -35,5 +38,20 @@ class TradesRepo:
         rows = [dict(r) for r in cur.fetchall()]
         conn.close()
         return rows
+
+    async def insert_trade(self, basket_id: str, regime: str, z_entry: float, latency: float, symbol: str, pnl: float = 0.0):
+        """Asynchronously dumps physical execution telemetry onto the permanent ledger for the RL ShadowEngine."""
+        import asyncio
+        import time
+        loop = asyncio.get_event_loop()
+        def _write():
+            query = """
+                INSERT INTO trades (
+                    basket_id, symbol, regime, z_entry_used, execution_latency_ms, pnl, timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """
+            params = (basket_id, symbol, regime, z_entry, latency, pnl, time.time())
+            self.execute(query, params)
+        await loop.run_in_executor(None, _write)
 
 trades_repo = TradesRepo()

@@ -15,13 +15,25 @@ class AlphaEngine:
         self.bus = message_bus
         self.ticks = collections.defaultdict(lambda: collections.deque(maxlen=1000))
         self.last_calc_time = 0.0
+        self.z_entry = 2.0
+        self.z_exit = 0.5
+
+    async def listen_for_params(self):
+        while True:
+            from omega_system.core.types import ParamUpdate
+            update: ParamUpdate = await self.bus.param_update_queue.get()
+            self.z_entry = update.z_entry
+            self.z_exit = update.z_exit
+            logger.warning(f"[SHADOW AI] DNA Reprogrammed. New Z-Entry: {self.z_entry:.2f} | Z-Exit: {self.z_exit:.2f}")
+            self.bus.param_update_queue.task_done()
 
     async def start_worker(self):
         logger.info("[AlphaEngine] Statistical Arbitrage Coprocessor online...")
+        asyncio.create_task(self.listen_for_params())
         while True:
-            tick: Tick = await self.bus.tick_queue.get()
+            tick: Tick = await self.bus.regime_tick_queue.get()
             await self._process_tick(tick)
-            self.bus.tick_queue.task_done()
+            self.bus.regime_tick_queue.task_done()
 
     async def _process_tick(self, tick: Tick):
         self.ticks[tick.symbol].append(tick)
@@ -69,16 +81,20 @@ class AlphaEngine:
             if sigma < 1e-12: return None
             z_score = (spread[-1] - mu) / sigma
             
+            # Fetch derived algorithmic regime from the tick ingestion tail
+            current_regime = self.ticks[asset_a][-1].regime if len(self.ticks[asset_a]) > 0 else "UNKNOWN"
+            
             # Emit Signal if beyond execution thresholds
-            if abs(z_score) >= 2.0:
-                logger.info(f"[AlphaEngine] Z-SCORE BREACH ({z_score:.2f}) on {asset_a}/{asset_b}")
+            if abs(z_score) >= self.z_entry:
+                logger.info(f"[AlphaEngine] Z-SCORE BREACH ({z_score:.2f}) on {asset_a}/{asset_b} [Regime: {current_regime}]")
                 return Signal(
                     basket_id=f"BSKT_{asset_a}_{asset_b}",
                     asset_a=asset_a,
                     asset_b=asset_b,
                     action="ENTER",
                     beta=float(beta),
-                    confidence=abs(z_score)  # Proxy for Expected Value to pass Risk limits
+                    confidence=abs(z_score),  # Proxy for Expected Value to pass Risk limits
+                    regime=current_regime
                 )
         except Exception as e:
             logger.debug(f"[AlphaEngine] Math constraint failure: {e}")
