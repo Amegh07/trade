@@ -1,0 +1,10 @@
+MetaTrader5>=5.0.45
+pandas>=2.2.0
+numpy>=1.26.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+pytz>=2024.1
+torch>=2.4.0
+transformers>=4.45.0
+accelerate>=0.34.0
+chronos-forecasting>=1.1.0
