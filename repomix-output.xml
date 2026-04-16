@@ -80,6 +80,7 @@ GAP_RISK_DEFENSE_PATCH.md
 launch_dashboard.py
 main.py
 MARKET_MECHANICS_AUDIT.md
+omega_system/adapters/api_server.py
 omega_system/adapters/mt5_client.py
 omega_system/config/settings.py
 omega_system/config/universe.py
@@ -90,10 +91,14 @@ omega_system/db/trades_repo.py
 omega_system/engines/alpha_engine.py
 omega_system/engines/data_engine.py
 omega_system/engines/execution_engine.py
+omega_system/engines/market_state_engine.py
 omega_system/engines/recon_engine.py
 omega_system/engines/risk_engine.py
+omega_system/engines/shadow_engine.py
 omega_system/engines/state_engine.py
+omega_system/engines/watchdog_engine.py
 omega_system/main.py
+omega_system/utils/institutional_simulator.py
 omega_system/utils/logger.py
 pyrightconfig.json
 QUANTITATIVE_AUDIT.md
@@ -2020,622 +2025,127 @@ Estimated total dev time: **90 minutes**.
 ROI: **Prevent $100k+ in monthly losses**.
 </file>
 
-<file path="omega_system/adapters/mt5_client.py">
+<file path="omega_system/adapters/api_server.py">
 import asyncio
-import MetaTrader5 as mt5
-import pandas as pd
-import time
-from omega_system.utils.logger import setup_logger
-
-# Use professional logger exclusively configured within the utils path
-logger = setup_logger("mt5_client")
-
-def initialize_mt5(login=None, password=None, server=None):
-    """
-    Initializes the MetaTrader5 terminal. If credentials are provided, attempts login.
-    """
-    logger.info("Initializing MetaTrader5 connection...")
-    
-    # MT5 strictly requires integer login IDs natively
-    if login is not None:
-        try:
-            login = int(login)
-        except (ValueError, TypeError):
-            logger.warning(f"Invalid login ID '{login}'. Resetting to generic launch.")
-            login = None
-
-    if login and password and server:
-        logger.info(f"Attempting to launch and log in to '{server}' account '{login}'...")
-        if not mt5.initialize(login=login, password=password, server=server):
-            logger.error(f"mt5.initialize(credentials) failed, error code: {mt5.last_error()}")
-            return False
-    else:
-        logger.info("Launching generic MT5 terminal (no remote credentials applied)...")
-        if not mt5.initialize():
-            logger.error(f"mt5.initialize() failed generically, error code: {mt5.last_error()}")
-            return False
-            
-    logger.info("MetaTrader5 initialized successfully.")
-    return True
-
-def fetch_rates(symbol, count, timeframe=mt5.TIMEFRAME_M5):
-    """
-    Fetches historical M5 data (or specified timeframe) for a given symbol.
-    Returns a localized pandas DataFrame with 'time' as the index.
-    """
-    logger.info(f"Fetching {count} rates for {symbol} at timeframe {timeframe}...")
-    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
-    
-    if rates is None:
-        logger.error(f"Failed to fetch rates, error code: {mt5.last_error()}")
-        # Return an empty DataFrame with the expected index name
-        df = pd.DataFrame()
-        df.index.name = 'time'
-        return df
-        
-    # Convert to DataFrame
-    df = pd.DataFrame(rates)
-    
-    # Convert 'time' to datetime objects and set as index
-    df['time'] = pd.to_datetime(df['time'], unit='s')
-    
-    # "localized pandas DataFrame" - often means timezone awareness
-    # MT5 times are server-time, but let's localize if needed or leave as is.
-    # To be extremely safe, we assign the time column as the index.
-    df.set_index('time', inplace=True)
-    
-    logger.info(f"Successfully fetched {len(df)} records for {symbol}.")
-    return df
-
-def shutdown_mt5():
-    """
-    Shuts down the MetaTrader5 connection.
-    """
-    logger.info("Shutting down MetaTrader5...")
-    mt5.shutdown()
-    logger.info("MetaTrader5 shutdown complete.")
-
-def get_open_positions(symbol=None):
-    """
-    Directly queries the MT5 terminal to find active trades.
-    Bypassing local configurations ensures robust state logic.
-    """
-    if symbol:
-        positions = mt5.positions_get(symbol=symbol)
-    else:
-        positions = mt5.positions_get()
-        
-    if positions is None:
-        logger.error(f"Failed to fetch positions. Error code: {mt5.last_error()}")
-        return []
-        
-    # Return as list allowing immediate iterative access
-    return list(positions)
-
-def get_active_symbols():
-    """
-    Returns a list of all currently visible (Market Watch) symbols from the MT5 terminal
-    that the engine is equipped to trade. Supports Forex, Metals, Indices, and Synthetics.
-    """
-    symbols = mt5.symbols_get()
-    if symbols is None:
-        logger.error(f"Failed to fetch symbols. Error code: {mt5.last_error()}")
-        return []
-
-    # Fix #24: Expand beyond FOREX-only. The engine is tick_size-aware (Flaws 11/12)
-    # and can correctly handle Metals, Indices, and Synthetics.
-    # Include all visible symbols whose calc mode is one of the well-supported types.
-    SUPPORTED_CALC_MODES = {
-        mt5.SYMBOL_CALC_MODE_FOREX,          # Standard Forex pairs
-        mt5.SYMBOL_CALC_MODE_CFD,            # Indices, Metals (e.g., XAUUSD, US500)
-        mt5.SYMBOL_CALC_MODE_CFDINDEX,       # Index CFDs (some brokers)
-        mt5.SYMBOL_CALC_MODE_CFDLEVERAGE,    # Leveraged CFDs
-    }
-
-    active_symbols = [
-        s.name for s in symbols
-        if s.visible and s.trade_calc_mode in SUPPORTED_CALC_MODES
-    ]
-
-    logger.info(f"Dynamically discovered {len(active_symbols)} tradeable symbols (Forex + CFDs).")
-    return active_symbols
-
-def execute_order(symbol, order_type, volume, sl=None, tp=None):
-    """
-    Constructs the MT5 request dictionary and executes an order,
-    incorporating a retry mechanism for requotes and price changes.
-    """
-    # 0 implies a market execution deal
-    action = mt5.TRADE_ACTION_DEAL
-    
-    # Capture the latest live price context to format the order efficiently
-    tick = mt5.symbol_info_tick(symbol)
-    if tick is None:
-        logger.error(f"execute_order: symbol_info_tick({symbol}) returned None — aborting.")
-        return None
-
-    if order_type == mt5.ORDER_TYPE_BUY:
-        price = tick.ask
-    elif order_type == mt5.ORDER_TYPE_SELL:
-        price = tick.bid
-    else:
-        logger.error(f"Unsupported order_type natively passed: {order_type}")
-        return None
-        
-    # Instantiate universally standardized MT5 routing dictionary
-    request = {
-        "action": action,
-        "symbol": symbol,
-        "volume": float(volume),
-        "type": order_type,
-        "price": price,
-        "deviation": 20,
-        "magic": 100000,
-        "comment": "algorithmic_trade",
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
-    }
-    
-    if sl is not None:
-        request["sl"] = float(sl)
-    if tp is not None:
-        request["tp"] = float(tp)
-        
-    max_retries = 3
-    for attempt in range(max_retries):
-        logger.info(f"Attempting order execution ({attempt+1}/{max_retries}) - Symbol: {symbol}, Type: {order_type}, Vol: {volume}")
-        
-        # Fire signal payload over the terminal bridge
-        result = mt5.order_send(request)
-        
-        if result is None:
-            logger.error(f"order_send failed unconditionally. Error: {mt5.last_error()}")
-            return None
-            
-        if result.retcode == mt5.TRADE_RETCODE_DONE:
-            logger.info(f"Order executed successfully! Deal ticket: {result.deal}, Retcode: {result.retcode}")
-            return result
-            
-        # Inspect for requotes / volatile price failures and initialize retry
-        if result.retcode in [mt5.TRADE_RETCODE_REQUOTE, mt5.TRADE_RETCODE_PRICE_CHANGED]:
-            logger.warning(f"Order failure. Retcode: {result.retcode}. Price volatility/requote triggered. Retrying after 1s...")
-            
-            # Re-poll live ticker pricing since market momentum skewed the previous target
-            if order_type == mt5.ORDER_TYPE_BUY:
-                request["price"] = mt5.symbol_info_tick(symbol).ask
-            elif order_type == mt5.ORDER_TYPE_SELL:
-                request["price"] = mt5.symbol_info_tick(symbol).bid
-                
-            time.sleep(1)
-            continue
-            
-        # Any disparate failure logs statically and fractures out
-        logger.error(f"Permanent order failure. Retcode: {result.retcode}, Comment: {result.comment}")
-        return result
-        
-    logger.error(f"Failed to execute order across {max_retries} loop spans due to rolling volatility constraint.")
-    return None
-
-async def get_order_book_micro_price(symbol: str) -> float:
-    subscribed = mt5.market_book_add(symbol)
-    if not subscribed:
-        logger.warning(f"Failed to subscribe to market book for {symbol}")
-        return 0.0
-        
-    try:
-        # Yield event loop while MT5 populates the book (non-blocking)
-        await asyncio.sleep(0.05)
-        book = mt5.market_book_get(symbol)
-        if not book:
-            return 0.0
-            
-        best_bid = 0.0
-        best_ask = float('inf')
-        vol_bid = 0.0
-        vol_ask = 0.0
-        
-        for item in book:
-            if item.type == mt5.BOOK_TYPE_SELL: # Ask
-                if item.price < best_ask:
-                    best_ask = item.price
-                vol_ask += item.volume
-            elif item.type == mt5.BOOK_TYPE_BUY: # Bid
-                if item.price > best_bid:
-                    best_bid = item.price
-                vol_bid += item.volume
-                
-        if vol_bid + vol_ask == 0.0 or best_bid == 0.0 or best_ask == float('inf'):
-            return 0.0
-            
-        p_micro = ((best_ask * vol_bid) + (best_bid * vol_ask)) / (vol_bid + vol_ask)
-        return p_micro
-        
-    finally:
-        if subscribed:
-            mt5.market_book_release(symbol)
-</file>
-
-<file path="omega_system/config/settings.py">
-import os
-
-class Settings:
-    MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "5.0"))
-    MAX_RISK_PCT = float(os.getenv("MAX_RISK_PCT", "2.0"))
-    DB_PATH = os.getenv("OMEGA_DB_PATH", "logs/trades.db")
-    CONTROL_DB_PATH = os.getenv("OMEGA_CONTROL_DB_PATH", "logs/control.db")
-    GHOST_MODE = os.getenv("GHOST_MODE", "False") == "True"
-
-settings = Settings()
-</file>
-
-<file path="omega_system/config/universe.py">
-# TRADABLE_PAIRS matrix isolates asset universes from trading loops.
-# Each tuple defines the highly cointegrated primary and hedge leg.
-
-TRADABLE_PAIRS = [
-    ("EURUSD", "GBPUSD"),
-    ("USDJPY", "USDCHF"),
-]
-</file>
-
-<file path="omega_system/core/message_bus.py">
-import asyncio
-import logging
-from typing import Any
-
-logger = logging.getLogger("MessageBus")
-
-class MessageBus:
-    def __init__(self):
-        # Async queues for inter-engine communication
-        self.tick_queue = asyncio.Queue()            # DataEngine -> AlphaEngine / RiskEngine
-        self.raw_signal_queue = asyncio.Queue()      # AlphaEngine -> RiskEngine
-        self.approved_signal_queue = asyncio.Queue() # RiskEngine -> ExecutionEngine
-        
-    async def publish_signal(self, signal: Any) -> None:
-        """Alpha Engine uses this to broadcast a signal."""
-        try:
-            # Replaces the blocking put_nowait that caused CRITICAL-2
-            await self.raw_signal_queue.put(signal)
-            logger.debug(f"[Bus] Raw signal published for basket: {getattr(signal, 'basket_id', 'UNKNOWN')}")
-        except Exception as e:
-            logger.error(f"[Bus] Failed to publish signal: {e}")
-
-    async def publish_approved_trade(self, signal: Any) -> None:
-        """Risk Engine uses this to pass vetted trades to the Execution Engine."""
-        await self.approved_signal_queue.put(signal)
-        logger.info(f"[Bus] Trade APPROVED and routed to Execution: {getattr(signal, 'basket_id', 'UNKNOWN')}")
-</file>
-
-<file path="omega_system/core/types.py">
-from dataclasses import dataclass, field
-from typing import Dict, Optional
-from enum import Enum
-import time
-
-class OrderStatus(Enum):
-    PENDING = "PENDING"
-    OPEN = "OPEN"
-    FAILED = "FAILED"
-    CLOSING = "CLOSING"
-    CLOSED = "CLOSED"
-
-@dataclass
-class Tick:
-    symbol: str
-    bid: float
-    ask: float
-    last: float
-    volume: float
-    time: float
-
-@dataclass
-class Signal:
-    basket_id: str
-    asset_a: str
-    asset_b: str
-    action: str  # "ENTER" or "CLOSE"
-    beta: float
-    confidence: float
-    timestamp: float = field(default_factory=time.time)
-
-@dataclass
-class LegState:
-    symbol: str
-    role: str  # "PRIMARY" or "HEDGE"
-    target_lot: float
-    filled_lot: float = 0.0
-    ticket: Optional[int] = None
-    status: OrderStatus = OrderStatus.PENDING
-
-@dataclass
-class BasketState:
-    basket_id: str
-    status: OrderStatus
-    legs: Dict[str, LegState]
-    entry_time: float
-    z_score_entry: float
-    error_msg: Optional[str] = None
-</file>
-
-<file path="omega_system/db/state_repo.py">
-import sqlite3
 import json
-import os
-from omega_system.config.settings import settings
+import logging
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from omega_system.engines.state_engine import StateEngine
+from omega_system.core.message_bus import MessageBus
 
-class StateRepo:
-    def __init__(self):
-        os.makedirs(os.path.dirname(settings.CONTROL_DB_PATH), exist_ok=True)
+logger = logging.getLogger("APIServer")
+
+app = FastAPI()
+app.state_engine = None
+app.message_bus = None
+app.server_logic = None
+
+class APIServer:
+    def __init__(self, state_engine: StateEngine, message_bus: MessageBus):
+        self.state = state_engine
+        self.bus = message_bus
+        self.clients = []
         
-    def write_snapshot(self, state: dict) -> None:
-        conn = sqlite3.connect(settings.CONTROL_DB_PATH, timeout=5.0)
-        cur = conn.cursor()
-        cur.execute("CREATE TABLE IF NOT EXISTS state_snapshots (id INTEGER PRIMARY KEY, state_json TEXT, timestamp REAL)")
-        cur.execute("INSERT INTO state_snapshots (state_json, timestamp) VALUES (?, strftime('%s','now'))", (json.dumps(state),))
-        conn.commit()
-        conn.close()
-        
-    def write_override(self, key: str, value: str) -> None:
-        conn = sqlite3.connect(settings.CONTROL_DB_PATH, timeout=5.0)
-        cur = conn.cursor()
-        cur.execute("CREATE TABLE IF NOT EXISTS control_state (key TEXT PRIMARY KEY, value TEXT)")
-        cur.execute("REPLACE INTO control_state (key, value) VALUES (?, ?)", (key, value))
-        conn.commit()
-        conn.close()
+    async def stream_loop(self):
+        logger.info("[APIServer] Bridging React Native WS telemetry stream at 1Hz...")
+        while True:
+            await asyncio.sleep(1.0)
+            if not self.clients:
+                continue
+                
+            snapshot = await self.state.get_snapshot()
+            
+            # Format raw structs into serialized objects
+            formatted_pos = {}
+            for k, v in snapshot.items():
+                formatted_pos[k] = {
+                    "status": v.status.value,
+                    "legs": {lk: lv.symbol for lk, lv in v.legs.items()},
+                    "regime": getattr(v, 'regime', 'UNKNOWN')
+                }
+                
+            payload = {
+                "health": "ONLINE",
+                "active_baskets": len(snapshot),
+                "baskets": formatted_pos
+            }
+            
+            msg = json.dumps(payload)
+            for ws in self.clients.copy():
+                try:
+                    await ws.send_text(msg)
+                except Exception:
+                    self.clients.remove(ws)
 
-    def fetch_override(self, key: str) -> str:
-        try:
-            conn = sqlite3.connect(f"file:{settings.CONTROL_DB_PATH}?mode=ro", uri=True)
-            cur = conn.cursor()
-            cur.execute("SELECT value FROM control_state WHERE key=?", (key,))
-            row = cur.fetchone()
-            conn.close()
-            return row[0] if row else ""
-        except:
-            return ""
-
-state_repo = StateRepo()
+@app.websocket("/ws/stream")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    if app.server_logic is not None:
+        app.server_logic.clients.append(websocket)
+        logger.info("[APIServer] React Command Center Hook Linked!")
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Command processing vector
+    except WebSocketDisconnect:
+        if app.server_logic and websocket in app.server_logic.clients:
+            app.server_logic.clients.remove(websocket)
+        logger.info("[APIServer] React Client Disconnected from Socket Bridge.")
 </file>
 
-<file path="omega_system/db/trades_repo.py">
-import sqlite3
-import os
-from omega_system.config.settings import settings
-
-class TradesRepo:
-    def __init__(self):
-        os.makedirs(os.path.dirname(settings.DB_PATH), exist_ok=True)
-        # Initialize tables if necessary
-        self.execute("""
-            CREATE TABLE IF NOT EXISTS trades (
-                ticket INTEGER PRIMARY KEY,
-                symbol TEXT,
-                volume REAL,
-                price_open REAL,
-                price_close REAL,
-                pnl REAL,
-                timestamp REAL,
-                type INTEGER,
-                basket_id TEXT
-            )
-        """)
-
-    def execute(self, query: str, params: tuple = ()) -> None:
-        conn = sqlite3.connect(settings.DB_PATH, timeout=5.0)
-        cur = conn.cursor()
-        cur.execute(query, params)
-        conn.commit()
-        conn.close()
-        
-    def fetch(self, query: str, params: tuple = ()) -> list:
-        conn = sqlite3.connect(f"file:{settings.DB_PATH}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute(query, params)
-        rows = [dict(r) for r in cur.fetchall()]
-        conn.close()
-        return rows
-
-trades_repo = TradesRepo()
-</file>
-
-<file path="omega_system/engines/alpha_engine.py">
+<file path="omega_system/engines/market_state_engine.py">
 import asyncio
 import logging
 import collections
-import pandas as pd
 import numpy as np
-import statsmodels.api as sm
-from statsmodels.tsa.stattools import coint
-from omega_system.core.types import Tick, Signal
-from omega_system.core.message_bus import MessageBus
-
-logger = logging.getLogger("AlphaEngine")
-
-class AlphaEngine:
-    def __init__(self, message_bus: MessageBus):
-        self.bus = message_bus
-        self.ticks = collections.defaultdict(lambda: collections.deque(maxlen=1000))
-        self.last_calc_time = 0.0
-
-    async def start_worker(self):
-        logger.info("[AlphaEngine] Statistical Arbitrage Coprocessor online...")
-        while True:
-            tick: Tick = await self.bus.tick_queue.get()
-            await self._process_tick(tick)
-            self.bus.tick_queue.task_done()
-
-    async def _process_tick(self, tick: Tick):
-        self.ticks[tick.symbol].append(tick)
-        
-        loop = asyncio.get_running_loop()
-        
-        # Trigger periodic Cointegration math on an interval (Simulated M15 formation proxy)
-        if (loop.time() - self.last_calc_time) > 5.0:
-            self.last_calc_time = loop.time()
-            
-            # Utilizing asyncio.to_thread prevents the statsmodels OLS from blocking the event loop
-            sig = await asyncio.to_thread(self._sync_coint, "EURUSD", "GBPUSD")
-            if sig:
-                await self.bus.publish_signal(sig)
-
-    def _sync_coint(self, asset_a: str, asset_b: str) -> Signal:
-        """Isolated mathematical processor evaluating historical pricing."""
-        q_a = list(self.ticks[asset_a])
-        q_b = list(self.ticks[asset_b])
-        
-        if len(q_a) < 100 or len(q_b) < 100:
-            return None
-            
-        df_a = pd.DataFrame([vars(t) for t in q_a])
-        df_b = pd.DataFrame([vars(t) for t in q_b])
-        
-        # Inner merge aligns time epochs precisely
-        df_merged = pd.merge(df_a, df_b, on='time', how='inner', suffixes=('_a', '_b'))
-        if len(df_merged) < 100:
-            return None
-            
-        y = df_merged['bid_a'].values
-        x = df_merged['bid_b'].values
-        
-        try:
-            _, p_value, _ = coint(y, x)
-            x_const = sm.add_constant(x)
-            model = sm.OLS(y, x_const).fit()
-            beta = model.params[1]
-            constant = model.params[0]
-            
-            spread = y - (beta * x + constant)
-            mu, sigma = np.mean(spread[-20:]), np.std(spread[-20:])
-            
-            if sigma < 1e-12: return None
-            z_score = (spread[-1] - mu) / sigma
-            
-            # Emit Signal if beyond execution thresholds
-            if abs(z_score) >= 2.0:
-                logger.info(f"[AlphaEngine] Z-SCORE BREACH ({z_score:.2f}) on {asset_a}/{asset_b}")
-                return Signal(
-                    basket_id=f"BSKT_{asset_a}_{asset_b}",
-                    asset_a=asset_a,
-                    asset_b=asset_b,
-                    action="ENTER",
-                    beta=float(beta),
-                    confidence=abs(z_score)  # Proxy for Expected Value to pass Risk limits
-                )
-        except Exception as e:
-            logger.debug(f"[AlphaEngine] Math constraint failure: {e}")
-            
-        return None
-</file>
-
-<file path="omega_system/engines/data_engine.py">
-import asyncio
-import logging
-import MetaTrader5 as mt5
 from omega_system.core.types import Tick
 from omega_system.core.message_bus import MessageBus
-from omega_system.adapters.mt5_client import MT5Client
 
-logger = logging.getLogger("DataEngine")
+logger = logging.getLogger("MarketStateEngine")
 
-class DataEngine:
-    def __init__(self, mt5_client: MT5Client, message_bus: MessageBus):
-        self.mt5 = mt5_client
+class MarketStateEngine:
+    def __init__(self, message_bus: MessageBus):
         self.bus = message_bus
-        # Tracking primary pairs for statistical arbitrage
-        self.symbols = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF"]
+        self.history = collections.defaultdict(lambda: collections.deque(maxlen=50))
 
     async def start_worker(self):
-        logger.info("[DataEngine] Commencing async tick polling sequence...")
+        logger.info("[MarketStateEngine] Regime detection heuristics online. Sniffing flow.")
         while True:
-            for sym in self.symbols:
-                tick_info = mt5.symbol_info_tick(sym)
-                if tick_info:
-                    tick_dt = Tick(
-                        symbol=sym,
-                        bid=tick_info.bid,
-                        ask=tick_info.ask,
-                        last=tick_info.last,
-                        volume=tick_info.volume_real,
-                        time=float(tick_info.time)
-                    )
-                    await self.bus.tick_queue.put(tick_dt)
-            
-            # Polling limiter preventing MT5 terminal CPU locks
-            await asyncio.sleep(0.01)
-</file>
+            tick: Tick = await self.bus.raw_tick_queue.get()
+            await self._classify_regime(tick)
+            self.bus.raw_tick_queue.task_done()
 
-<file path="omega_system/engines/execution_engine.py">
-import asyncio
-import logging
-from omega_system.core.types import Signal, OrderStatus
-from omega_system.engines.state_engine import StateEngine
-from omega_system.core.message_bus import MessageBus
-from omega_system.adapters.mt5_client import MT5Client  # Your raw MT5 wrapper
-
-logger = logging.getLogger("ExecutionEngine")
-
-class ExecutionEngine:
-    def __init__(self, state_engine: StateEngine, message_bus: MessageBus, mt5_client: MT5Client):
-        self.state = state_engine
-        self.bus = message_bus
-        self.mt5 = mt5_client
-
-    async def start_worker(self):
-        """Continuously listens for approved trades."""
-        logger.info("[ExecutionEngine] Armed and listening for approved signals...")
-        while True:
-            signal: Signal = await self.bus.approved_signal_queue.get()
-            await self._execute_atomic_basket(signal)
-            self.bus.approved_signal_queue.task_done()
-
-    async def _execute_atomic_basket(self, sig: Signal):
-        """The core atomic sequence: Register -> Leg A -> Leg B -> Rollback on failure."""
-        b_id = sig.basket_id
+    async def _classify_regime(self, tick: Tick):
+        mid = (tick.bid + tick.ask) / 2.0
+        self.history[tick.symbol].append(mid)
         
-        # STEP 1: Reserve state as PENDING (Failsafe)
-        registered = await self.state.register_pending_basket(
-            b_id, sig.asset_a, 1.0, sig.asset_b, sig.beta, sig.confidence
-        )
-        if not registered:
-            return # State engine rejected it (e.g., already exists)
-
-        try:
-            # STEP 2: Execute PRIMARY Leg A
-            logger.info(f"[{b_id}] Executing Leg A: {sig.asset_a}")
-            leg_a_ticket = await self.mt5.market_order(sig.asset_a, "ENTER", 1.0)
+        prices = list(self.history[tick.symbol])
+        
+        # Default fallback
+        regime = "DEAD"
+        
+        if len(prices) >= 20: 
+            std_dev = np.std(prices)
+            mean_price = np.mean(prices)
+            var_pct = std_dev / mean_price
             
-            if not leg_a_ticket:
-                logger.error(f"[{b_id}] Leg A FAILED. Aborting basket.")
-                await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Leg A rejected by broker")
-                return
-            
-            await self.state.update_leg_fill(b_id, "PRIMARY", leg_a_ticket, 1.0)
+            # Simple heuristic constants
+            if var_pct > 0.005:  # High volatility / Chop
+                regime = "VOLATILE"
+            elif var_pct < 0.0002: # Extremely tight variance
+                regime = "DEAD"
+            else:
+                # Check for trend vs range via delta mapping over window
+                delta = prices[-1] - prices[0]
+                if abs(delta) > (std_dev * 1.5): # Drifting directionally outside 1.5 bands
+                    regime = "TRENDING"
+                else: # Returning consistently
+                    regime = "RANGING"
 
-            # STEP 3: Execute HEDGE Leg B
-            logger.info(f"[{b_id}] Executing Leg B: {sig.asset_b}")
-            leg_b_ticket = await self.mt5.market_order(sig.asset_b, "ENTER", sig.beta)
-
-            if not leg_b_ticket:
-                logger.critical(f"[{b_id}] Leg B FAILED. Initiating ATOMIC ROLLBACK on Leg A.")
-                # ROLLBACK LEG A
-                rollback_success = await self.mt5.close_position_by_ticket(sig.asset_a, leg_a_ticket)
-                if not rollback_success:
-                    logger.error(f"[{b_id}] ⚠️ ROLLBACK FAILED! Unhedged exposure exists on {sig.asset_a}!")
-                
-                await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Leg B failed, Leg A rolled back")
-                return
-
-            await self.state.update_leg_fill(b_id, "HEDGE", leg_b_ticket, sig.beta)
-
-            # STEP 4: Both legs succeeded. Mark OPEN.
-            await self.state.transition_basket_state(b_id, OrderStatus.OPEN)
-            logger.info(f"[{b_id}] Basket execution complete. Fully hedged.")
-
-        except Exception as e:
-            logger.critical(f"[{b_id}] Fatal execution exception: {e}")
-            await self.state.transition_basket_state(b_id, OrderStatus.FAILED, str(e))
+        tick.regime = regime
+        
+        # Forward enriched tick to Alpha pipeline
+        await self.bus.regime_tick_queue.put(tick)
 </file>
 
 <file path="omega_system/engines/recon_engine.py">
@@ -2691,229 +2201,289 @@ class ReconciliationEngine:
                     await self.state.transition_basket_state(b_id, OrderStatus.CLOSED)
 </file>
 
-<file path="omega_system/engines/risk_engine.py">
+<file path="omega_system/engines/shadow_engine.py">
 import asyncio
 import logging
-from omega_system.core.types import Signal
+import sqlite3
 from omega_system.core.message_bus import MessageBus
-from omega_system.engines.state_engine import StateEngine
+from omega_system.core.types import ParamUpdate
+from omega_system.config.settings import settings
 
-logger = logging.getLogger("RiskEngine")
+logger = logging.getLogger("ShadowEngine")
 
-class RiskEngine:
-    def __init__(self, message_bus: MessageBus, state_engine: StateEngine):
+class ShadowEngine:
+    def __init__(self, message_bus: MessageBus):
+        from omega_system.config.settings import settings
         self.bus = message_bus
-        self.state = state_engine
-        
-        # Failsafe Limits
-        self.max_daily_loss = -2000.0  # Hard stop limit
-        self.current_daily_pnl = 0.0   # Would be synced from DB on boot
+        self.current_z_entry = 2.0
+        self.current_z_exit = 0.5 
+        # Clamped Parameters (Guardrails)
+        self.min_z_entry = 2.0
+        self.max_z_entry = 4.5
+        self.retrain_timer = settings.SHADOW_AI_RETRAIN_INTERVAL_SEC
 
     async def start_worker(self):
-        """Continuously intercepts raw signals to vet them."""
-        logger.info("[RiskEngine] Armed and guarding execution flow...")
+        logger.info("[ShadowEngine] L3 Heuristic AI Adaptation Loop armed.")
         while True:
-            signal: Signal = await self.bus.raw_signal_queue.get()
-            await self._evaluate_signal(signal)
-            self.bus.raw_signal_queue.task_done()
+            # Slower cyclic sweep dictated by hyper-parameter registry
+            await asyncio.sleep(self.retrain_timer)
+            await self._run_adaptation()
 
-    async def _evaluate_signal(self, sig: Signal):
-        b_id = sig.basket_id
-
-        # RULE 1: Global Failsafe (Daily Loss Limit)
-        if self.current_daily_pnl <= self.max_daily_loss:
-            logger.critical(f"[{b_id}] BLOCKED: Max daily loss breached. System halted.")
-            return
-
-        # RULE 2: The Mathematical Edge (CRITICAL-5 FIX)
-        # If the expected value (confidence/Kelly) is 0 or negative, DO NOT TRADE.
-        if sig.confidence <= 0.0:
-            logger.warning(f"[{b_id}] GHOST MODE: Negative edge detected (Kelly <= 0). Signal discarded.")
-            return
-
-        # RULE 3: Exposure Limits
-        snapshot = await self.state.get_snapshot()
-        if b_id in snapshot:
-            logger.warning(f"[{b_id}] BLOCKED: Basket already active in State Engine.")
-            return
-
-        # If it survives the gauntlet, pass it to the Muscle.
-        logger.info(f"[{b_id}] APPROVED: Signal passed all risk parameters.")
-        await self.bus.publish_approved_trade(sig)
-</file>
-
-<file path="omega_system/engines/state_engine.py">
-import logging
-import asyncio
-from typing import Dict, Optional
-from omega_system.core.types import BasketState, LegState, OrderStatus
-
-logger = logging.getLogger("StateEngine")
-
-class StateEngine:
-    def __init__(self):
-        # THE SINGLE SOURCE OF TRUTH
-        # Dictionary mapping basket_id -> BasketState
-        self._active_positions: Dict[str, BasketState] = {}
-        self._lock = asyncio.Lock()  # Ensures async-safe updates
-
-    async def register_pending_basket(self, basket_id: str, sym_a: str, lot_a: float, sym_b: str, lot_b: float, z_score: float) -> bool:
-        """Reserves the state BEFORE execution begins."""
-        async with self._lock:
-            if basket_id in self._active_positions:
-                logger.error(f"[State] Basket {basket_id} already exists. Rejecting registration.")
-                return False
-            
-            self._active_positions[basket_id] = BasketState(
-                basket_id=basket_id,
-                status=OrderStatus.PENDING,
-                entry_time=0.0, # Will be set when OPEN
-                z_score_entry=z_score,
-                legs={
-                    "PRIMARY": LegState(symbol=sym_a, role="PRIMARY", target_lot=lot_a),
-                    "HEDGE": LegState(symbol=sym_b, role="HEDGE", target_lot=lot_b)
-                }
-            )
-            logger.info(f"[State] Registered PENDING basket: {basket_id}")
-            return True
-
-    async def update_leg_fill(self, basket_id: str, role: str, ticket: int, filled_lot: float) -> None:
-        """Atomic update for a specific leg's execution result."""
-        async with self._lock:
-            basket = self._active_positions.get(basket_id)
-            if not basket:
-                logger.error(f"[State] Cannot update leg for unknown basket {basket_id}")
-                return
-
-            leg = basket.legs.get(role)
-            if leg:
-                leg.ticket = ticket
-                leg.filled_lot = filled_lot
-                leg.status = OrderStatus.OPEN
-                logger.debug(f"[State] Updated {role} leg for {basket_id} (Ticket: {ticket})")
-
-    async def transition_basket_state(self, basket_id: str, new_status: OrderStatus, error_msg: str = None) -> None:
-        """Moves the whole basket state (e.g., PENDING -> OPEN, or OPEN -> FAILED)."""
-        async with self._lock:
-            basket = self._active_positions.get(basket_id)
-            if not basket:
-                return
-
-            basket.status = new_status
-            if error_msg:
-                basket.error_msg = error_msg
-            
-            import time
-            if new_status == OrderStatus.OPEN:
-                basket.entry_time = time.time()
-
-            logger.info(f"[State] Basket {basket_id} transitioned to {new_status.name}")
-
-            # Memory cleanup: If closed or failed and fully processed, we can pop it
-            # (In a real system, you might move this to a 'history' dict instead of deleting)
-            if new_status in [OrderStatus.CLOSED, OrderStatus.FAILED]:
-                logger.info(f"[State] Archiving basket {basket_id} from active memory.")
-                self._active_positions.pop(basket_id, None)
-
-    async def get_snapshot(self) -> Dict[str, BasketState]:
-        """Returns a read-only copy of the current truth for other engines to read."""
-        async with self._lock:
-            # Shallow copy of the dict to prevent iteration errors during reads
-            return self._active_positions.copy()
-
-state_engine = StateEngine()
-</file>
-
-<file path="omega_system/main.py">
-import asyncio
-import logging
-import signal
-import sys
-
-from omega_system.adapters.mt5_client import MT5Client
-from omega_system.core.message_bus import MessageBus
-from omega_system.engines.state_engine import StateEngine
-from omega_system.engines.data_engine import DataEngine
-from omega_system.engines.alpha_engine import AlphaEngine
-from omega_system.engines.risk_engine import RiskEngine
-from omega_system.engines.execution_engine import ExecutionEngine
-from omega_system.engines.recon_engine import ReconciliationEngine
-
-# 8. Logging configuration
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("Supervisor")
-
-async def main():
-    logger.info("Initializing Omega System V2 Architecture...")
-
-    # 3. Initialization Sequence
-    mt5 = MT5Client()
-    
-    # Depending on the system, initialize might be async or sync. Assuming async per your prompt's "await mt5.initialize()"
-    try:
-        await mt5.initialize()
-    except TypeError:
-        # Fallback if mt5.initialize() turns out to be synchronous in the actual wrapper
-        mt5.initialize()
+    async def _run_adaptation(self):
+        logger.info("[ShadowEngine] Accessing historical database for DNA mutation analysis...")
         
-    bus = MessageBus()
-    state = StateEngine()
+        # Offload DB hit to prevent event loop bottlenecks
+        trades = await asyncio.to_thread(self._fetch_memory)
+        
+        if len(trades) < 5:
+            logger.debug("[ShadowEngine] Insufficient trades for statistical adaptation.")
+            return
 
-    # 4. Dependency Injection
-    data_engine = DataEngine(mt5, bus)
-    alpha_engine = AlphaEngine(bus)
-    risk_engine = RiskEngine(bus, state)
-    exec_engine = ExecutionEngine(state, bus, mt5)
-    recon_engine = ReconciliationEngine(state, mt5)
+        wins = [t for t in trades if t['pnl'] > 0]
+        win_rate = len(wins) / len(trades)
+        avg_pnl = sum(t['pnl'] for t in trades) / len(trades)
+        
+        logger.info(f"[ShadowEngine] Target Analysis: Win Rate={win_rate*100:.1f}%, AvgPnL={avg_pnl:.2f}")
 
-    # 5. The Async Loop
-    logger.info("Starting up microservice cluster...")
-    tasks = [
-        asyncio.create_task(data_engine.start_worker(), name="DataTask"),
-        asyncio.create_task(alpha_engine.start_worker(), name="AlphaTask"),
-        asyncio.create_task(risk_engine.start_worker(), name="RiskTask"),
-        asyncio.create_task(exec_engine.start_worker(), name="ExecTask"),
-        asyncio.create_task(recon_engine.start_worker(), name="ReconTask")
-    ]
-
-    # Signal handler for graceful shutdown
-    loop = asyncio.get_running_loop()
-    
-    def handle_shutdown():
-        logger.info("Shutting down Omega System...")
-        for task in tasks:
-            task.cancel()
-
-    # Windows does not support add_signal_handler natively, so we implement safely
-    if sys.platform != "win32":
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, handle_shutdown)
+        changed = False
+        
+        # RL Heuristic Optimization Engine
+        if win_rate < 0.40:
+            logger.warning("[ShadowEngine] Edge Decay detected. Tightening entry threshold.")
+            self.current_z_entry = min(self.max_z_entry, self.current_z_entry + 0.2)
+            changed = True
             
-    # 6. Await all tasks
-    try:
-        await asyncio.gather(*tasks)
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        logger.error(f"Fatal error in execution loop: {e}")
-    finally:
-        # 7. Graceful Shutdown mt5 cleanup
-        logger.info("Clearing MT5 connection...")
-        try:
-            mt5.shutdown()
-        except Exception:
-            pass
-        logger.info("Shutdown complete.")
+        elif win_rate > 0.65 and avg_pnl > 0.0:
+            logger.info("[ShadowEngine] Alpha abundance detected. Loosening entry constraints.")
+            self.current_z_entry = max(self.min_z_entry, self.current_z_entry - 0.1)
+            changed = True
+            
+        if changed:
+            logger.warning(f"[ShadowEngine] Emitting DNA Reprogramming Sequence (Z_entry={self.current_z_entry:.2f})...")
+            update = ParamUpdate(z_entry=self.current_z_entry, z_exit=self.current_z_exit)
+            await self.bus.param_update_queue.put(update)
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        # Fallback for Windows graceful termination
-        logger.info("Shutting down Omega System...")
+    def _fetch_memory(self):
+        try:
+            conn = sqlite3.connect(f"file:{settings.DB_PATH}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT pnl, regime FROM trades ORDER BY timestamp DESC LIMIT 50")
+            rows = [dict(r) for r in cur.fetchall()]
+            conn.close()
+            return rows
+        except Exception as e:
+            logger.error(f"[ShadowEngine] Failed to access trades.db: {e}")
+            return []
+</file>
+
+<file path="omega_system/engines/watchdog_engine.py">
+import asyncio
+import logging
+import os
+import signal
+import time
+import MetaTrader5 as mt5
+from omega_system.adapters.mt5_client import MT5Client
+from omega_system.engines.state_engine import StateEngine
+from omega_system.core.message_bus import MessageBus
+from omega_system.core.types import OrderStatus
+
+logger = logging.getLogger("WatchdogEngine")
+
+class WatchdogEngine:
+    def __init__(self, mt5_client: MT5Client, state_engine: StateEngine, message_bus: MessageBus):
+        from omega_system.config.settings import settings
+        self.mt5 = mt5_client
+        self.state = state_engine
+        self.bus = message_bus
+        self.timeout_sec = settings.WATCHDOG_TIMEOUT_SEC
+
+    async def start_worker(self):
+        logger.info("[WatchdogEngine] L0 Failsafe Armed. Heartbeat array initialized.")
+        while True:
+            await asyncio.sleep(5.0)
+            await self._run_diagnostics()
+
+    async def _run_diagnostics(self):
+        # 1. Connection Check (Is the pipeline cut?)
+        info = mt5.terminal_info()
+        if info is None or not info.connected:
+            logger.critical("[Watchdog] ⚠️ MT5 Disconnected! Terminal response void.")
+            recovered = await self._attempt_recovery()
+            if not recovered:
+                await self._emergency_shutdown("MT5 Terminal Connection Extinguished")
+                return
+                
+        # 2. Data Feed Stagnation Checks (Are we flying blind?)
+        last_tick = await self.state.get_last_tick_time()
+        stagnation = time.time() - last_tick
+        
+        # Dead silence triggers a halt mapping centralized parameters
+        if stagnation > self.timeout_sec:
+            logger.critical(f"[Watchdog] ⚠️ Data feed frozen for {stagnation:.1f}s! Silent Deadlock detected.")
+            await self._emergency_shutdown(f"Data Feed Stagnation (Frozen for {stagnation:.1f}s)")
+
+    async def _attempt_recovery(self) -> bool:
+        """Attemps broker re-link up to 3 times."""
+        for i in range(3):
+            logger.warning(f"[Watchdog] Re-initialization node strike {i+1}/3...")
+            try:
+                res = await self.mt5.initialize()
+                if res: 
+                    logger.info("[Watchdog] MT5 Comms re-established.")
+                    return True
+            except TypeError:
+                # Sync fallback handling just in case the execution client passes it natively
+                res = self.mt5.initialize()
+                if res: 
+                    logger.info("[Watchdog] MT5 Comms re-established.")
+                    return True
+                
+            await asyncio.sleep(2.0)
+        return False
+
+    async def _emergency_shutdown(self, reason: str):
+        """The final abort button."""
+        logger.critical(f"=======================================")
+        logger.critical(f"🚨   EMERGENCY SHUTDOWN INITIATED   🚨")
+        logger.critical(f"    REASON: {reason}")
+        logger.critical(f"=======================================")
+        
+        # First order of business: Flatten the active positions immediately
+        snapshot = await self.state.get_snapshot()
+        for b_id, basket in snapshot.items():
+            if basket.status == OrderStatus.OPEN:
+                logger.critical(f"[Watchdog] Flattening active basket {b_id} instantly...")
+                for role, leg in basket.legs.items():
+                    if leg.ticket:
+                        # Targeted closure
+                        await self.mt5.close_position_by_ticket(leg.symbol, leg.ticket)
+                        logger.critical(f"    -> Hard-closed Ticket: {leg.ticket}")
+                    else:
+                        # Sweep closure
+                        await self.mt5.close_position_by_symbol(leg.symbol)
+                        logger.critical(f"    -> Swept Symbol: {leg.symbol}")
+        
+        logger.critical("[Watchdog] Book flattened. Severing the supervisor loop.")
+        
+        # Initiate a surgical OS level SIGTERM to shut the python thread completely via standard system protocols.
+        # Ensure that external managers like PM2 or Systemd can restart it automatically.
+        os.kill(os.getpid(), signal.SIGTERM)
+</file>
+
+<file path="omega_system/utils/institutional_simulator.py">
+import pandas as pd
+import numpy as np
+import logging
+
+logger = logging.getLogger("InstitutionalSimulator")
+
+class InstitutionalSimulator:
+    def __init__(self, latency_delay_ms: int = 200, pip_size: float = 0.0001):
+        self.latency_ms = latency_delay_ms
+        self.pip_size = pip_size
+
+    def simulate_execution(self, ticks_df: pd.DataFrame, signals_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Iterates chronologically through historical signals, imposing localized
+        latency and dynamic market-impact modifiers onto the tick array.
+        """
+        logger.info("[Simulator] Initializing Institutional Backtest Reality Matrix...")
+        
+        if ticks_df.empty or signals_df.empty:
+            logger.warning("[Simulator] Empty dataframes passed. Aborting.")
+            return pd.DataFrame()
+            
+        # Ensure strict chronological alignment
+        ticks_df = ticks_df.sort_values(by='time').reset_index(drop=True)
+        signals_df = signals_df.sort_values(by='timestamp').reset_index(drop=True)
+        
+        # 2. SPREAD SIMULATION (Volatility-driven expansion)
+        # Using simple mid-price variance as a proxy for widening market spreads
+        mid_prices = (ticks_df['bid'] + ticks_df['ask']) / 2.0
+        rolling_vol = mid_prices.rolling(window=50, min_periods=1).std()
+        
+        # Avoid division by zero by stabilizing the mean
+        mean_vol = rolling_vol.mean()
+        if mean_vol == 0:
+            mean_vol = 1e-9
+            
+        vol_multiplier = 1.0 + (rolling_vol / mean_vol)
+        base_spread = 1.0 * self.pip_size
+        
+        results = []
+
+        for _, signal in signals_df.iterrows():
+            sig_time = signal['timestamp']
+            action = signal.get('action', 'BUY').upper()
+            volume = float(signal.get('target_lot', 1.0))
+            
+            # 3. SLIPPAGE INJECTION
+            # Fast forward time to when the network logic physically arrives at the central orderbook
+            exec_time = sig_time + (self.latency_ms / 1000.0)
+            
+            # Use binary search to locate the exact tick present at the moment the packet hits
+            target_idx = np.searchsorted(ticks_df['time'].values, exec_time)
+            
+            if target_idx >= len(ticks_df):
+                continue # Network arrived after data horizon ceased
+                
+            tick = ticks_df.iloc[target_idx]
+            
+            # Base spread dynamics
+            raw_bid = tick['bid']
+            raw_ask = tick['ask']
+            
+            # Dynamic expansion based on surrounding volatility structure
+            current_expansion = (vol_multiplier.iloc[target_idx] - 1.0) * base_spread
+            
+            # 4. VWAP PENALTY (Liquidity impact)
+            vwap_penalty = 0.0
+            if volume > 2.0:
+                vwap_penalty = 1.5 * self.pip_size
+                
+            # Establish absolute fill price accounting for physical constraints
+            if action in ["BUY", "ENTER_LONG"]:
+                final_fill = raw_ask + current_expansion + vwap_penalty
+                base_price = raw_ask
+            elif action in ["SELL", "ENTER_SHORT"]:
+                final_fill = raw_bid - current_expansion - vwap_penalty
+                base_price = raw_bid
+            else: # Market Close
+                final_fill = (raw_ask + raw_bid) / 2.0
+                base_price = final_fill
+
+            results.append({
+                'ticket_id': signal.get('basket_id', 'SIM_TRADE'),
+                'symbol': signal.get('symbol', 'UNKNOWN'),
+                'action': action,
+                'target_lot': volume,
+                'signal_time': sig_time,
+                'execution_time': tick['time'],
+                'slippage_ms': (tick['time'] - sig_time) * 1000.0,
+                'ideal_price': base_price,
+                'filled_price': final_fill,
+                'penalty_pips': (vwap_penalty + current_expansion) / self.pip_size
+            })
+
+        simulated_ledger = pd.DataFrame(results)
+        
+        logger.info(f"[Simulator] Synthesized {len(simulated_ledger)} physical trade routes.")
+        return simulated_ledger
+
+    def generate_pnl_matrix(self, simulated_ledger: pd.DataFrame) -> pd.DataFrame:
+        """
+        Parses the physical execution arrays into a resolved PnL sheet for the ShadowEngine.
+        """
+        logger.info("[Simulator] Generating PnL matrix for RL evaluation...")
+        # A mock mapping linking the entry and exit timestamps to score profitability
+        # Implementation scales based on the specific leg mapping parameters
+        
+        # Assuming sequential logic simplifies for mapping:
+        pnl_records = []
+        # Return dataframe simulating DB queries
+        return pd.DataFrame(pnl_records)
 </file>
 
 <file path="omega_system/utils/logger.py">
@@ -4305,6 +3875,1081 @@ async def get_order_book_micro_price(symbol: str) -> float:
     finally:
         if subscribed:
             mt5.market_book_release(symbol)
+</file>
+
+<file path="omega_system/adapters/mt5_client.py">
+import asyncio
+import MetaTrader5 as mt5
+import pandas as pd
+import time
+from omega_system.utils.logger import setup_logger
+
+logger = setup_logger("MT5Client")
+
+class MT5Client:
+    def __init__(self):
+        pass
+
+    async def initialize(self, login=None, password=None, server=None):
+        loop = asyncio.get_event_loop()
+        def _init():
+            if login and password and server:
+                return mt5.initialize(login=int(login), password=password, server=server)
+            return mt5.initialize()
+        return await loop.run_in_executor(None, _init)
+
+    async def symbol_info_tick(self, symbol):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, mt5.symbol_info_tick, symbol)
+
+    async def positions_get(self, symbol=None, ticket=None):
+        loop = asyncio.get_event_loop()
+        def _pos():
+            if ticket: return mt5.positions_get(ticket=ticket)
+            if symbol: return mt5.positions_get(symbol=symbol)
+            return mt5.positions_get()
+        return await loop.run_in_executor(None, _pos)
+
+    async def copy_rates_from_pos(self, symbol, timeframe, start_pos, count):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, mt5.copy_rates_from_pos, symbol, timeframe, start_pos, count)
+
+    async def order_send(self, request):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, mt5.order_send, request)
+
+    # Core Execution Engine Resolvers (Non-Blocking)
+    async def market_order(self, symbol, action, volume):
+        tick = await self.symbol_info_tick(symbol)
+        if tick is None:
+            logger.error(f"[MT5Client] market_order failed to retrieve tick for {symbol}")
+            return None
+            
+        ord_type = mt5.ORDER_TYPE_BUY if action in ["BUY", "ENTER"] else mt5.ORDER_TYPE_SELL
+        price = tick.ask if ord_type == mt5.ORDER_TYPE_BUY else tick.bid
+        
+        req = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": float(volume),
+            "type": ord_type,
+            "price": price,
+            "deviation": 20,
+            "magic": 100000,
+            "comment": "omega_v2",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        res = await self.order_send(req)
+        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+            return res.order
+        if res:
+            logger.error(f"[MT5Client] Order rejected by broker: {res.comment} [{res.retcode}]")
+        return None
+
+    async def close_position_by_ticket(self, symbol, ticket):
+        positions = await self.positions_get(ticket=ticket)
+        if not positions: return False
+        
+        pos = positions[0]
+        ord_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        tick = await self.symbol_info_tick(symbol)
+        if not tick: return False
+        
+        price = tick.bid if ord_type == mt5.ORDER_TYPE_SELL else tick.ask
+        
+        req = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": pos.volume,
+            "type": ord_type,
+            "position": ticket,
+            "price": price,
+            "deviation": 20,
+            "magic": 100000,
+            "comment": "closing",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        res = await self.order_send(req)
+        return (res is not None and res.retcode == mt5.TRADE_RETCODE_DONE)
+
+    async def close_position_by_symbol(self, symbol):
+        success = True
+        positions = await self.positions_get(symbol=symbol)
+        if not positions: return True
+        for p in positions:
+            res = await self.close_position_by_ticket(symbol, p.ticket)
+            if not res: success = False
+        return success
+        
+    async def terminal_info(self):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, mt5.terminal_info)
+        
+    async def get_order_book(self, symbol: str) -> dict:
+        """Leak-proof Async DOM fetcher for Smart Routing liquidity tests."""
+        loop = asyncio.get_event_loop()
+        
+        subscribed = await loop.run_in_executor(None, mt5.market_book_add, symbol)
+        if not subscribed:
+            return {"bid_vol": 0.0, "ask_vol": 0.0}
+            
+        try:
+            await asyncio.sleep(0.05) # Allow MT5 engine to pool DOM frames
+            book = await loop.run_in_executor(None, mt5.market_book_get, symbol)
+            if not book:
+                return {"bid_vol": 0.0, "ask_vol": 0.0}
+                
+            bid_vol = sum(i.volume for i in book if i.type == mt5.BOOK_TYPE_BUY)
+            ask_vol = sum(i.volume for i in book if i.type == mt5.BOOK_TYPE_SELL)
+            return {"bid_vol": bid_vol, "ask_vol": ask_vol}
+            
+        finally:
+            # Memory leak patch: Guarantee release overriding any network failure cases
+            await loop.run_in_executor(None, mt5.market_book_release, symbol)
+        
+    def shutdown(self):
+        mt5.shutdown()
+</file>
+
+<file path="omega_system/config/settings.py">
+import os
+from dataclasses import dataclass
+
+@dataclass
+class SystemConfig:
+    MAX_DAILY_LOSS_USD: float = float(os.getenv("MAX_DAILY_LOSS", "-2000.0"))
+    MAX_SPREAD_POINTS: int = int(os.getenv("MAX_SPREAD_POINTS", "15"))
+    VWAP_LOT_THRESHOLD: float = float(os.getenv("VWAP_LOT_THRESHOLD", "2.0"))
+    WATCHDOG_TIMEOUT_SEC: float = float(os.getenv("WATCHDOG_TIMEOUT_SEC", "60.0"))
+    SHADOW_AI_RETRAIN_INTERVAL_SEC: float = float(os.getenv("SHADOW_AI_RETRAIN_INTERVAL_SEC", "3600.0"))
+    DB_PATH: str = os.getenv("OMEGA_DB_PATH", "logs/trades.db")
+    CONTROL_DB_PATH: str = os.getenv("OMEGA_CONTROL_DB_PATH", "logs/control.db")
+    GHOST_MODE: bool = os.getenv("GHOST_MODE", "False") == "True"
+
+settings = SystemConfig()
+</file>
+
+<file path="omega_system/config/universe.py">
+# TRADABLE_PAIRS matrix isolates asset universes from trading loops.
+# Provides base normalization values for dynamically scoped calculations.
+
+TRADABLE_PAIRS = [
+    "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", 
+    "NZDUSD", "USDCAD", "EURGBP", "EURJPY", "GBPJPY", 
+    "AUDJPY", "EURAUD", "XAUUSD", "XAGUSD", "US30"
+]
+
+SYMBOL_METADATA = {
+    "EURUSD": {"pip_size": 0.0001, "min_lot": 0.01},
+    "GBPUSD": {"pip_size": 0.0001, "min_lot": 0.01},
+    "USDJPY": {"pip_size": 0.01, "min_lot": 0.01},
+    "USDCHF": {"pip_size": 0.0001, "min_lot": 0.01},
+    "AUDUSD": {"pip_size": 0.0001, "min_lot": 0.01},
+    "NZDUSD": {"pip_size": 0.0001, "min_lot": 0.01},
+    "USDCAD": {"pip_size": 0.0001, "min_lot": 0.01},
+    "EURGBP": {"pip_size": 0.0001, "min_lot": 0.01},
+    "EURJPY": {"pip_size": 0.01, "min_lot": 0.01},
+    "GBPJPY": {"pip_size": 0.01, "min_lot": 0.01},
+    "AUDJPY": {"pip_size": 0.01, "min_lot": 0.01},
+    "EURAUD": {"pip_size": 0.0001, "min_lot": 0.01},
+    "XAUUSD": {"pip_size": 0.01, "min_lot": 0.01},
+    "XAGUSD": {"pip_size": 0.01, "min_lot": 0.01},
+    "US30": {"pip_size": 1.0, "min_lot": 0.1},
+}
+</file>
+
+<file path="omega_system/core/message_bus.py">
+import asyncio
+import logging
+from typing import Any
+
+logger = logging.getLogger("MessageBus")
+
+class MessageBus:
+    def __init__(self):
+        # Async queues for inter-engine communication
+        self.raw_tick_queue = asyncio.Queue()        # DataEngine -> MarketStateEngine
+        self.regime_tick_queue = asyncio.Queue()     # MarketStateEngine -> AlphaEngine
+        self.candle_queue = asyncio.Queue()          # DataEngine -> Alpha/MarketState (Candles)
+        self.raw_signal_queue = asyncio.Queue()      # AlphaEngine -> RiskEngine
+        self.approved_signal_queue = asyncio.Queue() # RiskEngine -> ExecutionEngine
+        self.param_update_queue = asyncio.Queue()    # ShadowEngine -> AlphaEngine
+        
+    async def publish_signal(self, signal: Any) -> None:
+        """Alpha Engine uses this to broadcast a signal."""
+        try:
+            # Replaces the blocking put_nowait that caused CRITICAL-2
+            await self.raw_signal_queue.put(signal)
+            logger.debug(f"[Bus] Raw signal published for basket: {getattr(signal, 'basket_id', 'UNKNOWN')}")
+        except Exception as e:
+            logger.error(f"[Bus] Failed to publish signal: {e}")
+
+    async def publish_approved_trade(self, signal: Any) -> None:
+        """Risk Engine uses this to pass vetted trades to the Execution Engine."""
+        await self.approved_signal_queue.put(signal)
+        logger.info(f"[Bus] Trade APPROVED and routed to Execution: {getattr(signal, 'basket_id', 'UNKNOWN')}")
+</file>
+
+<file path="omega_system/core/types.py">
+from dataclasses import dataclass, field
+from typing import Dict, Optional, Any
+from enum import Enum
+import time
+
+class OrderStatus(Enum):
+    PENDING = "PENDING"
+    OPEN = "OPEN"
+    FAILED = "FAILED"
+    CLOSING = "CLOSING"
+    CLOSED = "CLOSED"
+
+@dataclass
+class Tick:
+    symbol: str
+    bid: float
+    ask: float
+    last: float
+    volume: float
+    regime: str = "UNKNOWN"
+
+@dataclass
+class CandleSnapshot:
+    symbol: str
+    timeframe: str
+    rates: Any
+
+@dataclass
+class ParamUpdate:
+    z_entry: float
+    z_exit: float
+
+@dataclass
+class Signal:
+    basket_id: str
+    asset_a: str
+    asset_b: str
+    action: str  # "ENTER" or "CLOSE"
+    beta: float
+    confidence: float
+    regime: str = "UNKNOWN"
+    target_lot: float = 1.0
+    timestamp: float = field(default_factory=time.time)
+
+@dataclass
+class LegState:
+    symbol: str
+    role: str  # "PRIMARY" or "HEDGE"
+    target_lot: float
+    filled_lot: float = 0.0
+    ticket: Optional[int] = None
+    status: OrderStatus = OrderStatus.PENDING
+
+@dataclass
+class BasketState:
+    basket_id: str
+    status: OrderStatus
+    legs: Dict[str, LegState]
+    entry_time: float
+    z_score_entry: float
+    error_msg: Optional[str] = None
+    regime: str = "UNKNOWN"
+</file>
+
+<file path="omega_system/db/state_repo.py">
+import os
+import json
+import asyncio
+import logging
+from typing import Dict
+from omega_system.core.types import BasketState, LegState, OrderStatus
+
+logger = logging.getLogger("StateRepo")
+
+class StateRepository:
+    def __init__(self, backup_path="logs/state_backup.json"):
+        self.backup_path = backup_path
+        os.makedirs(os.path.dirname(self.backup_path), exist_ok=True)
+        self.temp_path = self.backup_path + ".tmp"
+        
+    async def save_snapshot(self, state_dict: Dict[str, BasketState]):
+        """Atomically serializes the active state pool to disk."""
+        loop = asyncio.get_event_loop()
+        
+        def _write():
+            raw_dict = {}
+            for k, v in state_dict.items():
+                legs_dict = {}
+                for l_k, l_v in v.legs.items():
+                    legs_dict[l_k] = {
+                        "symbol": l_v.symbol,
+                        "role": l_v.role,
+                        "target_lot": l_v.target_lot,
+                        "filled_lot": l_v.filled_lot,
+                        "ticket": l_v.ticket,
+                        "status": l_v.status.value
+                    }
+                
+                raw_dict[k] = {
+                    "basket_id": v.basket_id,
+                    "status": v.status.value,
+                    "legs": legs_dict,
+                    "entry_time": v.entry_time,
+                    "z_score_entry": v.z_score_entry,
+                    "error_msg": v.error_msg,
+                    "regime": v.regime
+                }
+            
+            with open(self.temp_path, "w") as f:
+                json.dump(raw_dict, f)
+            os.replace(self.temp_path, self.backup_path) # Atomic overwrite
+            
+        await loop.run_in_executor(None, _write)
+
+    async def load_snapshot(self) -> Dict[str, BasketState]:
+        """Loads and reconstitutes the exact runtime classes from memory payload."""
+        loop = asyncio.get_event_loop()
+        
+        def _read():
+            if not os.path.exists(self.backup_path):
+                return {}
+            try:
+                with open(self.backup_path, "r") as f:
+                    raw_dict = json.load(f)
+                
+                restored = {}
+                for k, v in raw_dict.items():
+                    legs = {}
+                    for l_k, l_v in v['legs'].items():
+                        legs[l_k] = LegState(
+                            symbol=l_v['symbol'],
+                            role=l_v['role'],
+                            target_lot=l_v['target_lot'],
+                            filled_lot=l_v['filled_lot'],
+                            ticket=l_v['ticket'],
+                            status=OrderStatus(l_v['status'])
+                        )
+                        
+                    restored[k] = BasketState(
+                        basket_id=v['basket_id'],
+                        status=OrderStatus(v['status']),
+                        legs=legs,
+                        entry_time=v['entry_time'],
+                        z_score_entry=v['z_score_entry'],
+                        error_msg=v['error_msg'],
+                        regime=v.get('regime', 'UNKNOWN')
+                    )
+                return restored
+            except Exception as e:
+                logger.error(f"[StateRepo] Failed to reconstitute memory snapshot: {e}")
+                return {}
+                
+        return await loop.run_in_executor(None, _read)
+</file>
+
+<file path="omega_system/db/trades_repo.py">
+import sqlite3
+import os
+from omega_system.config.settings import settings
+
+class TradesRepo:
+    def __init__(self):
+        os.makedirs(os.path.dirname(settings.DB_PATH), exist_ok=True)
+        # Initialize tables if necessary
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                ticket INTEGER PRIMARY KEY,
+                symbol TEXT,
+                volume REAL,
+                price_open REAL,
+                price_close REAL,
+                pnl REAL,
+                timestamp REAL,
+                type INTEGER,
+                basket_id TEXT,
+                regime TEXT,
+                z_entry_used REAL,
+                execution_latency_ms REAL
+            )
+        """)
+
+    def execute(self, query: str, params: tuple = ()) -> None:
+        conn = sqlite3.connect(settings.DB_PATH, timeout=5.0)
+        cur = conn.cursor()
+        cur.execute(query, params)
+        conn.commit()
+        conn.close()
+        
+    def fetch(self, query: str, params: tuple = ()) -> list:
+        conn = sqlite3.connect(f"file:{settings.DB_PATH}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(query, params)
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+
+    async def insert_trade(self, basket_id: str, regime: str, z_entry: float, latency: float, symbol: str, pnl: float = 0.0):
+        """Asynchronously dumps physical execution telemetry onto the permanent ledger for the RL ShadowEngine."""
+        import asyncio
+        import time
+        loop = asyncio.get_event_loop()
+        def _write():
+            query = """
+                INSERT INTO trades (
+                    basket_id, symbol, regime, z_entry_used, execution_latency_ms, pnl, timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """
+            params = (basket_id, symbol, regime, z_entry, latency, pnl, time.time())
+            self.execute(query, params)
+        await loop.run_in_executor(None, _write)
+
+trades_repo = TradesRepo()
+</file>
+
+<file path="omega_system/engines/alpha_engine.py">
+import asyncio
+import logging
+import collections
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+from statsmodels.tsa.stattools import coint
+from omega_system.core.types import Tick, Signal
+from omega_system.core.message_bus import MessageBus
+
+logger = logging.getLogger("AlphaEngine")
+
+class AlphaEngine:
+    def __init__(self, message_bus: MessageBus):
+        self.bus = message_bus
+        self.ticks = collections.defaultdict(lambda: collections.deque(maxlen=1000))
+        self.last_calc_time = 0.0
+        self.z_entry = 2.0
+        self.z_exit = 0.5
+
+    async def listen_for_params(self):
+        while True:
+            from omega_system.core.types import ParamUpdate
+            update: ParamUpdate = await self.bus.param_update_queue.get()
+            self.z_entry = update.z_entry
+            self.z_exit = update.z_exit
+            logger.warning(f"[SHADOW AI] DNA Reprogrammed. New Z-Entry: {self.z_entry:.2f} | Z-Exit: {self.z_exit:.2f}")
+            self.bus.param_update_queue.task_done()
+
+    async def start_worker(self):
+        logger.info("[AlphaEngine] Statistical Arbitrage Coprocessor online...")
+        asyncio.create_task(self.listen_for_params())
+        while True:
+            tick: Tick = await self.bus.regime_tick_queue.get()
+            await self._process_tick(tick)
+            self.bus.regime_tick_queue.task_done()
+
+    async def _process_tick(self, tick: Tick):
+        self.ticks[tick.symbol].append(tick)
+        
+        loop = asyncio.get_running_loop()
+        
+        # Trigger periodic Cointegration math on an interval (Simulated M15 formation proxy)
+        if (loop.time() - self.last_calc_time) > 5.0:
+            self.last_calc_time = loop.time()
+            
+            # Utilizing asyncio.to_thread prevents the statsmodels OLS from blocking the event loop
+            sig = await asyncio.to_thread(self._sync_coint, "EURUSD", "GBPUSD")
+            if sig:
+                await self.bus.publish_signal(sig)
+
+    def _sync_coint(self, asset_a: str, asset_b: str) -> Signal:
+        """Isolated mathematical processor evaluating historical pricing."""
+        q_a = list(self.ticks[asset_a])
+        q_b = list(self.ticks[asset_b])
+        
+        if len(q_a) < 100 or len(q_b) < 100:
+            return None
+            
+        df_a = pd.DataFrame([vars(t) for t in q_a])
+        df_b = pd.DataFrame([vars(t) for t in q_b])
+        
+        # Inner merge aligns time epochs precisely
+        df_merged = pd.merge(df_a, df_b, on='time', how='inner', suffixes=('_a', '_b'))
+        if len(df_merged) < 100:
+            return None
+            
+        y = df_merged['bid_a'].values
+        x = df_merged['bid_b'].values
+        
+        try:
+            _, p_value, _ = coint(y, x)
+            x_const = sm.add_constant(x)
+            model = sm.OLS(y, x_const).fit()
+            beta = model.params[1]
+            constant = model.params[0]
+            
+            spread = y - (beta * x + constant)
+            mu, sigma = np.mean(spread[-20:]), np.std(spread[-20:])
+            
+            if sigma < 1e-12: return None
+            z_score = (spread[-1] - mu) / sigma
+            
+            # Fetch derived algorithmic regime from the tick ingestion tail
+            current_regime = self.ticks[asset_a][-1].regime if len(self.ticks[asset_a]) > 0 else "UNKNOWN"
+            
+            # Emit Signal if beyond execution thresholds
+            if abs(z_score) >= self.z_entry:
+                logger.info(f"[AlphaEngine] Z-SCORE BREACH ({z_score:.2f}) on {asset_a}/{asset_b} [Regime: {current_regime}]")
+                return Signal(
+                    basket_id=f"BSKT_{asset_a}_{asset_b}",
+                    asset_a=asset_a,
+                    asset_b=asset_b,
+                    action="ENTER",
+                    beta=float(beta),
+                    confidence=abs(z_score),  # Proxy for Expected Value to pass Risk limits
+                    regime=current_regime
+                )
+        except Exception as e:
+            logger.debug(f"[AlphaEngine] Math constraint failure: {e}")
+            
+        return None
+</file>
+
+<file path="omega_system/engines/data_engine.py">
+import asyncio
+import logging
+import MetaTrader5 as mt5
+from omega_system.core.types import Tick
+from omega_system.core.message_bus import MessageBus
+from omega_system.adapters.mt5_client import MT5Client
+
+logger = logging.getLogger("DataEngine")
+
+class DataEngine:
+    def __init__(self, mt5_client: MT5Client, message_bus: MessageBus, state_engine=None):
+        from omega_system.config.universe import TRADABLE_PAIRS
+        self.mt5 = mt5_client
+        self.bus = message_bus
+        self.state = state_engine
+        # Dynamically imported from decentralized config matrix
+        self.symbols = TRADABLE_PAIRS
+
+    async def start_worker(self):
+        logger.info("[DataEngine] Commencing async tick and concurrent candle polling sequences...")
+        
+        # Deploy parallel background Candle synchronization
+        asyncio.create_task(self._poll_candles(), name="PollCandlesTask")
+        
+        while True:
+            for sym in self.symbols:
+                # MT5 Thread-safe execution
+                tick_info = await self.mt5.symbol_info_tick(sym)
+                if tick_info:
+                    tick_dt = Tick(
+                        symbol=sym,
+                        bid=tick_info.bid,
+                        ask=tick_info.ask,
+                        last=tick_info.last,
+                        time=float(tick_info.time)
+                    )
+                    await self.bus.raw_tick_queue.put(tick_dt)
+                    if self.state:
+                        await self.state.update_tick_time()
+            
+            # Polling limiter preventing MT5 terminal CPU locks
+            await asyncio.sleep(0.01)
+
+    async def _poll_candles(self):
+        import MetaTrader5 as mt5
+        from omega_system.core.types import CandleSnapshot
+        
+        logger.info("[DataEngine] Background Multi-TF Candle Poller initiated.")
+        while True:
+            # Re-sync every 60 seconds natively
+            await asyncio.sleep(60.0)
+            
+            tasks = []
+            queries = []
+            
+            # Fire all requests concurrently through thread pools
+            for sym in self.symbols:
+                # M15 (500 frames)
+                tasks.append(self.mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M15, 0, 500))
+                queries.append((sym, "M15"))
+                # H1 (50 frames)
+                tasks.append(self.mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_H1, 0, 50))
+                queries.append((sym, "H1"))
+                
+            results = await asyncio.gather(*tasks)
+            
+            # Map execution results onto the Queue payload stream
+            for (sym, tf), rates in zip(queries, results):
+                if rates is not None and len(rates) > 0:
+                    snap = CandleSnapshot(symbol=sym, timeframe=tf, rates=rates)
+                    await self.bus.candle_queue.put(snap)
+</file>
+
+<file path="omega_system/engines/execution_engine.py">
+import asyncio
+import logging
+import random
+import MetaTrader5 as mt5
+from typing import Tuple, List
+from omega_system.core.types import Signal, OrderStatus
+from omega_system.engines.state_engine import StateEngine
+from omega_system.core.message_bus import MessageBus
+from omega_system.adapters.mt5_client import MT5Client
+from omega_system.config.settings import settings
+
+logger = logging.getLogger("ExecutionEngine")
+
+class ExecutionEngine:
+    def __init__(self, state_engine: StateEngine, message_bus: MessageBus, mt5_client: MT5Client):
+        self.state = state_engine
+        self.bus = message_bus
+        self.mt5 = mt5_client
+        self.spread_threshold = settings.MAX_SPREAD_POINTS
+        self.vwap_threshold = settings.VWAP_LOT_THRESHOLD
+
+    async def start_worker(self):
+        """Continuously listens for approved trades."""
+        logger.info("[ExecutionEngine] Smart VWAP Router Armed and listening...")
+        while True:
+            signal: Signal = await self.bus.approved_signal_queue.get()
+            await self._execute_atomic_basket(signal)
+            self.bus.approved_signal_queue.task_done()
+
+    def _check_spread(self, symbol: str) -> bool:
+        """Fetches live spread in points, enforcing pre-trade liquidity gates."""
+        tick = mt5.symbol_info_tick(symbol)
+        info = mt5.symbol_info(symbol)
+        if not tick or not info:
+            logger.error(f"[SPREAD GUARD] Could not fetch tick/info for {symbol}")
+            return False
+            
+        spread_points = (tick.ask - tick.bid) / info.point
+        if spread_points > self.spread_threshold:
+            logger.warning(f"[SPREAD GUARD] {symbol} spread {spread_points:.1f} exceeds max {self.spread_threshold} pts.")
+            return False
+            
+        return True
+
+    async def _execute_smart_order(self, symbol: str, action: str, total_lot: float) -> Tuple[float, List[int], float]:
+        """
+        Executes a trade using VWAP Slicing logic.
+        Returns (average_fill_price, list_of_tickets, total_filled_lot).
+        """
+        slices = []
+        if total_lot <= self.vwap_threshold:
+            slices.append(total_lot)
+        else:
+            remaining = total_lot
+            while remaining >= 0.01:
+                chunk = round(min(1.0, remaining), 2)
+                slices.append(chunk)
+                remaining -= chunk
+
+        tickets = []
+        filled_lot = 0.0
+
+        for idx, chunk in enumerate(slices):
+            logger.info(f"[_execute_smart_order] {symbol} Route {idx+1}/{len(slices)} -> {chunk} lots")
+            ticket = await self.mt5.market_order(symbol, action, chunk)
+            
+            if not ticket:
+                logger.error(f"[_execute_smart_order] {symbol} slice {idx+1} FAILED. Liquidity dried.")
+                break
+                
+            tickets.append(ticket)
+            filled_lot += chunk
+            
+            if idx < len(slices) - 1:
+                # Absorb liquidity dynamically
+                await asyncio.sleep(random.uniform(0.1, 0.5))
+                
+        # Pseudo average fill calculation (A real implementation would log actual Deal prices natively)
+        avg_fill = 1.0 
+        return avg_fill, tickets, filled_lot
+
+    async def _rollback_tickets(self, symbol: str, tickets: List[int]) -> bool:
+        """Helper to cleanly close out a list of partially filled VWAP slice tickets."""
+        success = True
+        for tk in tickets:
+            res = await self.mt5.close_position_by_ticket(symbol, tk)
+            if not res:
+                success = False
+        return success
+
+    async def _execute_atomic_basket(self, sig: Signal):
+        """The core atomic sequence: Pre-Check -> Register -> Leg A -> Leg B -> Rollback."""
+        b_id = sig.basket_id
+        
+        # PRE-TRADE SPREAD CHECK
+        spread_a_ok = await asyncio.to_thread(self._check_spread, sig.asset_a)
+        spread_b_ok = await asyncio.to_thread(self._check_spread, sig.asset_b)
+        
+        if not spread_a_ok or not spread_b_ok:
+            logger.warning(f"[{b_id}] Spread check failed. Aborting execution.")
+            return
+        
+        # STEP 1: Reserve state as PENDING (Failsafe)
+        registered = await self.state.register_pending_basket(
+            b_id, sig.asset_a, sig.target_lot, sig.asset_b, sig.target_lot * sig.beta, sig.confidence, sig.regime
+        )
+        if not registered:
+            return 
+
+        try:
+            # STEP 2: Execute PRIMARY Leg A
+            logger.info(f"[{b_id}] Executing Leg A: {sig.asset_a} ({sig.target_lot} Lots)")
+            avg_price_a, leg_a_tickets, filled_a = await self._execute_smart_order(sig.asset_a, "ENTER", sig.target_lot)
+            
+            # Partial Fill Resolution
+            if filled_a < sig.target_lot:
+                logger.error(f"[{b_id}] Leg A PARTIAL FILL ({filled_a}/{sig.target_lot}). Initiating immediate rollback.")
+                if leg_a_tickets:
+                    await self._rollback_tickets(sig.asset_a, leg_a_tickets)
+                await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Leg A Partial Fill Rollback")
+                return
+            
+            # Store master ticket
+            await self.state.update_leg_fill(b_id, "PRIMARY", leg_a_tickets[0], filled_a) 
+
+            # STEP 3: Execute HEDGE Leg B
+            target_b = round(sig.target_lot * sig.beta, 2)
+            logger.info(f"[{b_id}] Executing Leg B: {sig.asset_b} ({target_b} Lots)")
+            avg_price_b, leg_b_tickets, filled_b = await self._execute_smart_order(sig.asset_b, "ENTER", target_b)
+
+            if filled_b < target_b:
+                logger.critical(f"[{b_id}] Leg B FAILED or PARTIAL ({filled_b}/{target_b}). Initiating ATOMIC ROLLBACK.")
+                
+                # ROLLBACK LEG B PARTIALS
+                if leg_b_tickets:
+                    await self._rollback_tickets(sig.asset_b, leg_b_tickets)
+                    
+                # ROLLBACK LEG A
+                rollback_success = await self._rollback_tickets(sig.asset_a, leg_a_tickets)
+                if not rollback_success:
+                    logger.error(f"[{b_id}] ⚠️ FATAL ROLLBACK FAILURE! Unhedged exposure exists on {sig.asset_a}!")
+                
+                await self.state.transition_basket_state(b_id, OrderStatus.FAILED, "Leg B failed, basket rolled back")
+                return
+
+            await self.state.update_leg_fill(b_id, "HEDGE", leg_b_tickets[0], filled_b)
+
+            # STEP 4: Both legs succeeded. Mark OPEN.
+            await self.state.transition_basket_state(b_id, OrderStatus.OPEN)
+            logger.info(f"[{b_id}] Basket execution complete. Fully hedged via Smart Routing.")
+
+        except Exception as e:
+            logger.critical(f"[{b_id}] Fatal execution exception: {e}")
+            await self.state.transition_basket_state(b_id, OrderStatus.FAILED, str(e))
+</file>
+
+<file path="omega_system/engines/risk_engine.py">
+import asyncio
+import logging
+from omega_system.core.types import Signal
+from omega_system.core.message_bus import MessageBus
+from omega_system.engines.state_engine import StateEngine
+
+logger = logging.getLogger("RiskEngine")
+
+class RiskEngine:
+    def __init__(self, message_bus: MessageBus, state_engine: StateEngine):
+        from omega_system.config.settings import settings
+        self.bus = message_bus
+        self.state = state_engine
+        
+        # Failsafe Limits driven by universe configuration
+        self.max_daily_loss = settings.MAX_DAILY_LOSS_USD  # Centralized hard stop
+        self.current_daily_pnl = 0.0   # Would be synced from DB on boot
+
+    async def start_worker(self):
+        """Continuously intercepts raw signals to vet them."""
+        logger.info("[RiskEngine] Armed and guarding execution flow...")
+        while True:
+            signal: Signal = await self.bus.raw_signal_queue.get()
+            await self._evaluate_signal(signal)
+            self.bus.raw_signal_queue.task_done()
+
+    async def _evaluate_signal(self, sig: Signal):
+        b_id = sig.basket_id
+
+        # RULE 1: Global Failsafe (Daily Loss Limit)
+        if self.current_daily_pnl <= self.max_daily_loss:
+            logger.critical(f"[{b_id}] BLOCKED: Max daily loss breached. System halted.")
+            return
+
+        # RULE 2: The Mathematical Edge (CRITICAL-5 FIX) + L2 Regime Overrides
+        REGIME_MULTIPLIER = {
+            "RANGING": 1.0,  # Full StatArb resonance
+            "TRENDING": 0.0, # StatArb fails in pure trends, hard veto
+            "VOLATILE": 0.3, # Chop zone whip-saw risk, slash sizing by 70%
+            "DEAD": 0.0,     # Slippage hazard inside flat variance, hard veto
+            "UNKNOWN": 0.0
+        }
+        
+        reg_mult = REGIME_MULTIPLIER.get(sig.regime, 0.0)
+        final_risk = sig.confidence * reg_mult
+
+        if final_risk <= 0.0:
+            logger.warning(f"[{b_id}] BLOCKED: Regime is {sig.regime}. Signal discarded.")
+            return
+
+        # Sizing algorithm: Convert expected edge array into fractional Lot output limits
+        # Here we translate the static 1.0 lot constraint to conform to the regime multiplier
+        sig.target_lot = max(0.01, round(1.0 * reg_mult, 2))
+        
+        # RULE 3: Exposure Limits
+        snapshot = await self.state.get_snapshot()
+        if b_id in snapshot:
+            logger.warning(f"[{b_id}] BLOCKED: Basket already active in State Engine.")
+            return
+
+        # If it survives the gauntlet, pass it to the Muscle.
+        logger.info(f"[{b_id}] APPROVED: Signal passed all risk parameters.")
+        await self.bus.publish_approved_trade(sig)
+</file>
+
+<file path="omega_system/engines/state_engine.py">
+import logging
+import asyncio
+from typing import Dict, Optional
+from omega_system.core.types import BasketState, LegState, OrderStatus
+
+logger = logging.getLogger("StateEngine")
+
+class StateEngine:
+    def __init__(self):
+        # THE SINGLE SOURCE OF TRUTH
+        # Dictionary mapping basket_id -> BasketState
+        from omega_system.db.state_repo import StateRepository
+        self._active_positions: Dict[str, BasketState] = {}
+        self._lock = asyncio.Lock()  # Ensures async-safe updates
+        import time
+        self._last_tick_time = time.time()
+        self.repo = StateRepository()
+
+    async def boot_restore(self):
+        """Called by the main supervisor block upon boot to recover crashed states"""
+        recovered = await self.repo.load_snapshot()
+        self._active_positions = recovered
+        logger.info(f"[StateEngine] Central memory reconstituted ({len(recovered)} positions imported).")
+
+    async def update_tick_time(self) -> None:
+        import time
+        self._last_tick_time = time.time()
+
+    async def get_last_tick_time(self) -> float:
+        return self._last_tick_time
+
+    async def register_pending_basket(self, basket_id: str, sym_a: str, lot_a: float, sym_b: str, lot_b: float, z_score: float, regime: str = "UNKNOWN") -> bool:
+        """Reserves the state BEFORE execution begins."""
+        async with self._lock:
+            if basket_id in self._active_positions:
+                logger.error(f"[State] Basket {basket_id} already exists. Rejecting registration.")
+                return False
+            
+            self._active_positions[basket_id] = BasketState(
+                basket_id=basket_id,
+                status=OrderStatus.PENDING,
+                entry_time=time.time(), # Initially set as memory registration time
+                z_score_entry=z_score,
+                regime=regime,
+                legs={
+                    "PRIMARY": LegState(symbol=sym_a, role="PRIMARY", target_lot=lot_a),
+                    "HEDGE": LegState(symbol=sym_b, role="HEDGE", target_lot=lot_b)
+                }
+            )
+            logger.info(f"[State] Registered PENDING basket: {basket_id}")
+            return True
+
+    async def update_leg_fill(self, basket_id: str, role: str, ticket: int, filled_lot: float) -> None:
+        """Atomic update for a specific leg's execution result."""
+        async with self._lock:
+            basket = self._active_positions.get(basket_id)
+            if not basket:
+                logger.error(f"[State] Cannot update leg for unknown basket {basket_id}")
+                return
+
+            leg = basket.legs.get(role)
+            if leg:
+                leg.ticket = ticket
+                leg.filled_lot = filled_lot
+                leg.status = OrderStatus.OPEN
+                logger.debug(f"[State] Updated {role} leg for {basket_id} (Ticket: {ticket})")
+                asyncio.create_task(self.repo.save_snapshot(self._active_positions.copy()))
+
+    async def transition_basket_state(self, basket_id: str, new_status: OrderStatus, error_msg: str = None) -> None:
+        """Moves the whole basket state (e.g., PENDING -> OPEN, or OPEN -> FAILED)."""
+        async with self._lock:
+            basket = self._active_positions.get(basket_id)
+            if not basket:
+                return
+
+            basket.status = new_status
+            if error_msg:
+                basket.error_msg = error_msg
+            
+            import time
+            if new_status == OrderStatus.OPEN:
+                basket.entry_time = time.time()
+
+            logger.info(f"[State] Basket {basket_id} transitioned to {new_status.name}")
+
+            # Memory cleanup: If closed or failed and fully processed, we can pop it
+            # (In a real system, you might move this to a 'history' dict instead of deleting)
+            if new_status in [OrderStatus.CLOSED, OrderStatus.FAILED]:
+                logger.info(f"[State] Archiving basket {basket_id} from active memory.")
+                self._active_positions.pop(basket_id, None)
+
+            # Mirror exact state mapping dynamically post-transaction 
+            asyncio.create_task(self.repo.save_snapshot(self._active_positions.copy()))
+
+    async def get_snapshot(self) -> Dict[str, BasketState]:
+        """Returns a read-only copy of the current truth for other engines to read."""
+        async with self._lock:
+            # Shallow copy of the dict to prevent iteration errors during reads
+            return self._active_positions.copy()
+
+    async def _garbage_collector_loop(self):
+        """Asynchronous system cleaner isolating stuck MT5 trades."""
+        import time
+        from omega_system.core.types import OrderStatus
+        
+        logger.info("[StateEngine API] Memory GC Pipeline Armed (120s PENDING limit).")
+        while True:
+            await asyncio.sleep(60.0)
+            async with self._lock:
+                current = time.time()
+                for b_id, basket in list(self._active_positions.items()):
+                    if basket.status == OrderStatus.PENDING:
+                        dur = current - basket.entry_time
+                        if dur > 120.0:
+                            logger.critical(f"[State GC] Basket {b_id} orphaned for {dur:.1f}s. Trashing state.")
+                            basket.status = OrderStatus.FAILED
+                            basket.error_msg = "Timeout in PENDING state"
+                            self._active_positions.pop(b_id, None)
+
+state_engine = StateEngine()
+</file>
+
+<file path="omega_system/main.py">
+import asyncio
+import logging
+import signal
+import sys
+
+from omega_system.adapters.mt5_client import MT5Client
+from omega_system.core.message_bus import MessageBus
+from omega_system.engines.state_engine import StateEngine
+from omega_system.engines.data_engine import DataEngine
+from omega_system.engines.alpha_engine import AlphaEngine
+from omega_system.engines.market_state_engine import MarketStateEngine
+from omega_system.engines.risk_engine import RiskEngine
+from omega_system.engines.execution_engine import ExecutionEngine
+from omega_system.engines.recon_engine import ReconciliationEngine
+from omega_system.engines.watchdog_engine import WatchdogEngine
+from omega_system.engines.shadow_engine import ShadowEngine
+
+# 8. Logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("Supervisor")
+
+async def main():
+    logger.info("Initializing Omega System V2...")
+
+    # 1. Graceful Exit Hook
+    def signal_handler(sig, frame):
+        logger.info('System termination signal received. Exiting safely...')
+        asyncio.create_task(shutdown())
+        
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # 2. Initialization
+    mt5 = MT5Client()
+    await mt5.initialize()
+    bus = MessageBus()
+    state = StateEngine()
+    
+    # 3. Serialized Memory Rescue Sequence (Avoid Amnesia)
+    await state.boot_restore()
+
+    # 4. Dependency Injection
+    data_engine = DataEngine(mt5, bus, state)
+    market_state_engine = MarketStateEngine(bus)
+    alpha_engine = AlphaEngine(bus)
+    risk_engine = RiskEngine(bus, state)
+    exec_engine = ExecutionEngine(state, bus, mt5)
+    recon_engine = ReconciliationEngine(state, mt5)
+    watchdog_engine = WatchdogEngine(mt5, state, bus)
+    shadow_engine = ShadowEngine(bus)
+
+    # Mount UI WS Server
+    from omega_system.adapters.api_server import APIServer, app
+    import uvicorn
+    api_server = APIServer(state, bus)
+    app.state_engine = state
+    app.message_bus = bus
+    app.server_logic = api_server
+    
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="warning")
+    server = uvicorn.Server(config)
+
+    # 5. The Async Loop
+    logger.info("Starting up microservice cluster...")
+    tasks = [
+        asyncio.create_task(data_engine.start_worker(), name="DataTask"),
+        asyncio.create_task(market_state_engine.start_worker(), name="MarketStateTask"),
+        asyncio.create_task(alpha_engine.start_worker(), name="AlphaTask"),
+        asyncio.create_task(risk_engine.start_worker(), name="RiskTask"),
+        asyncio.create_task(exec_engine.start_worker(), name="ExecTask"),
+        asyncio.create_task(recon_engine.start_worker(), name="ReconTask"),
+        asyncio.create_task(watchdog_engine.start_worker(), name="WatchdogTask"),
+        asyncio.create_task(shadow_engine.start_worker(), name="ShadowTask"),
+        asyncio.create_task(state._garbage_collector_loop(), name="StateGCTask"),
+        asyncio.create_task(api_server.stream_loop(), name="APIStreamTask"),
+        asyncio.create_task(server.serve(), name="UvicornServerTask")
+    ]
+
+    # Signal handler for graceful shutdown
+    loop = asyncio.get_running_loop()
+    
+    def handle_shutdown():
+        logger.info("Shutting down Omega System...")
+        for task in tasks:
+            task.cancel()
+
+    # Windows does not support add_signal_handler natively, so we implement safely
+    if sys.platform != "win32":
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, handle_shutdown)
+            
+    # 6. Await all tasks
+    try:
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.error(f"Fatal error in execution loop: {e}")
+    finally:
+        # 7. Graceful Shutdown mt5 cleanup
+        logger.info("Clearing MT5 connection...")
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+        logger.info("Shutdown complete.")
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # Fallback for Windows graceful termination
+        logger.info("Shutting down Omega System...")
 </file>
 
 <file path="core/data_feeder.py">

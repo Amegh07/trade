@@ -10,43 +10,88 @@ logger = logging.getLogger("MarketStateEngine")
 class MarketStateEngine:
     def __init__(self, message_bus: MessageBus):
         self.bus = message_bus
-        self.history = collections.defaultdict(lambda: collections.deque(maxlen=50))
+        # PER-SYMBOL ISOLATION
+        self.history = collections.defaultdict(lambda: collections.deque(maxlen=100))
+        
+        # HYSTERESIS STATE MACHINE
+        self.current_regime = {}
+        self.regime_candidate = {}
+        self.regime_candidate_count = collections.defaultdict(int)
+        
+        # ELITE CONSTANTS (Universally Normalized Thresholds)
+        self.high_vol_threshold = 0.0005     # 0.05% return stdev per tick represents violent chop
+        self.trend_threshold = 0.000015      # 0.0015% drift per sequence step marks direction
+        self.range_threshold = 0.0002        # Extremely tightly compressed delta marks deadness
 
     async def start_worker(self):
-        logger.info("[MarketStateEngine] Regime detection heuristics online. Sniffing flow.")
+        logger.info("[MarketStateEngine] Elite Regime Detection Armed. Vectorized Matrix Hysteresis Online.")
         while True:
             tick: Tick = await self.bus.raw_tick_queue.get()
             await self._classify_regime(tick)
             self.bus.raw_tick_queue.task_done()
 
     async def _classify_regime(self, tick: Tick):
+        sym = tick.symbol
         mid = (tick.bid + tick.ask) / 2.0
-        self.history[tick.symbol].append(mid)
+        self.history[sym].append(mid)
         
-        prices = list(self.history[tick.symbol])
-        
-        # Default fallback
-        regime = "DEAD"
-        
-        if len(prices) >= 20: 
-            std_dev = np.std(prices)
-            mean_price = np.mean(prices)
-            var_pct = std_dev / mean_price
+        # Init base tracking instances
+        if sym not in self.current_regime:
+            self.current_regime[sym] = "UNKNOWN"
+            self.regime_candidate[sym] = "UNKNOWN"
             
-            # Simple heuristic constants
-            if var_pct > 0.005:  # High volatility / Chop
-                regime = "VOLATILE"
-            elif var_pct < 0.0002: # Extremely tight variance
-                regime = "DEAD"
-            else:
-                # Check for trend vs range via delta mapping over window
-                delta = prices[-1] - prices[0]
-                if abs(delta) > (std_dev * 1.5): # Drifting directionally outside 1.5 bands
-                    regime = "TRENDING"
-                else: # Returning consistently
-                    regime = "RANGING"
-
-        tick.regime = regime
+        prices = list(self.history[sym])
         
-        # Forward enriched tick to Alpha pipeline
+        if len(prices) < 20: 
+            tick.regime = self.current_regime[sym]
+            await self.bus.regime_tick_queue.put(tick)
+            return
+            
+        # --- ELITE MATH LOGIC ---
+        arr = np.array(prices)
+        
+        # Normalize relative to starting vector mapping arrays safely around universal 1.0 baselines
+        norm_arr = arr / arr[0]
+        
+        # 1. Delta Return array
+        returns = np.diff(norm_arr)
+        
+        # 2. Extract standard sequence Volatility
+        volatility = np.std(returns)
+        
+        # 3. Extract regression vector Trend Slope directly representing overarching momentum
+        x = np.arange(len(norm_arr))
+        slope = np.polyfit(x, norm_arr, 1)[0]
+        
+        # 4. Assess boundary compression 
+        compression = np.max(norm_arr) - np.min(norm_arr)
+        
+        # --- CLASSIFICATION LAYER ---
+        if volatility > self.high_vol_threshold:
+            candidate = "VOLATILE"
+        elif abs(slope) > self.trend_threshold:
+            candidate = "TRENDING"
+        elif compression < self.range_threshold:
+            candidate = "DEAD"
+        else:
+            candidate = "RANGING"
+            
+        # --- HYSTERESIS APPLICATION ---
+        if candidate == self.current_regime[sym]:
+            self.regime_candidate_count[sym] = 0
+            self.regime_candidate[sym] = candidate
+        else:
+            if candidate == self.regime_candidate[sym]:
+                self.regime_candidate_count[sym] += 1
+            else:
+                self.regime_candidate[sym] = candidate
+                self.regime_candidate_count[sym] = 1
+                
+            if self.regime_candidate_count[sym] >= 5:
+                logger.debug(f"[MarketStateEngine] Regime Shift Hysteresis Passed for {sym}: {self.current_regime[sym]} -> {candidate}")
+                self.current_regime[sym] = candidate
+                self.regime_candidate_count[sym] = 0
+
+        # OUTPUT MAP
+        tick.regime = self.current_regime[sym]
         await self.bus.regime_tick_queue.put(tick)

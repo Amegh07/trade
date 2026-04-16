@@ -1,12 +1,8 @@
-MetaTrader5
-pandas
-numpy
-python-dotenv
-statsmodels
-
-# asyncio is part of the Python standard library (>= 3.4) — no pip install needed
-asyncio
-fastapi
-uvicorn
-websockets
-aiofiles
+MetaTrader5>=5.0.45
+pandas>=2.0.0
+numpy>=1.24.0
+statsmodels>=0.14.0
+fastapi>=0.100.0
+uvicorn>=0.23.0
+websockets>=11.0.0
+pydantic>=2.0.0
