@@ -35,6 +35,7 @@ import threading
 from collections import deque
 
 import numpy as np
+import sqlite3
 
 from core.alpha_engine import Signal
 from core.db_writer    import db_writer_daemon
@@ -109,9 +110,14 @@ class KellyEngine:
         self._trades.append(float(pnl))
 
     def kelly_fraction(self) -> float:
-        """Returns Half-Kelly ∈ [0.0, MAX_KELLY]."""
+        """Returns Half-Kelly ∈ [MINIMUM_KELLY_FLOOR, MAX_KELLY]."""
+        # ── RISK OVERRIDE FLOOR ──
+        # Ensure the bot always takes the shot if Z-Score threshold is reached,
+        # never returning 0.0 which causes a complete execution halt.
+        MINIMUM_KELLY_FLOOR = 0.01
+
         if len(self._trades) < 5:
-            return 0.01   # conservative bootstrap
+            return MINIMUM_KELLY_FLOOR
 
         arr    = np.array(self._trades, dtype=np.float64)
         wins   = arr[arr > 0]
@@ -119,7 +125,7 @@ class KellyEngine:
 
         W = len(wins) / len(arr)
         if W == 0.0 or len(losses) == 0:
-            return 0.0   # all losses or no data → ghost mode
+            return MINIMUM_KELLY_FLOOR   # all losses or no data → floor risk
 
         avg_win  = wins.mean()
         avg_loss = np.abs(losses.mean())
@@ -131,9 +137,11 @@ class KellyEngine:
         K = W - ((1.0 - W) / R)
 
         if K <= 0.0:
-            return 0.0
+            return MINIMUM_KELLY_FLOOR
 
-        return float(min(K / 2.0, self.MAX_KELLY))
+        k_half = K / 2.0
+        final_k_half = max(min(k_half, self.MAX_KELLY), MINIMUM_KELLY_FLOOR)
+        return float(final_k_half)
 
     def lot_size(
         self,
@@ -273,7 +281,8 @@ def execution_router_process(
 
     # ── Position monitor: feeds real closed PnL into KellyEngine ──────────────
     last_pnl_check  = time.time()
-    seen_deal_tickets: set = set()
+    # MEMORY LEAK PRUNING: Use bounded deque instead of unbounded set (maxlen=10000)
+    seen_deal_tickets = deque(maxlen=10000)
 
     async def _position_monitor(loop):
         """
@@ -299,7 +308,7 @@ def execution_router_process(
                                 deal.entry == mt5.DEAL_ENTRY_OUT
                                 and deal.ticket not in seen_deal_tickets
                             ):
-                                seen_deal_tickets.add(deal.ticket)
+                                seen_deal_tickets.append(deal.ticket)
                                 kelly.record(deal.profit)
                                 active_symbols.discard(deal.symbol)
                                 
@@ -322,14 +331,40 @@ def execution_router_process(
                     logger.warning(f"_position_monitor error: {exc}")
 
     # ── Commander Override helper ──────────────────────────────────────────────
-    def _read_override() -> tuple:
-        """Reads config.json for manual_override and poll_interval."""
+    def _read_control_state() -> dict:
+        """Reads the unified control state from SQLite with strict timeout."""
         try:
-            with open("config.json", "r") as f:
-                cfg = json.load(f)
-            return cfg.get("manual_override", False), cfg.get("poll_interval", None)
-        except Exception:
-            return False, None
+            conn = sqlite3.connect("file:logs/trades.db?mode=ro", uri=True, timeout=0.5)
+            cur = conn.cursor()
+            cur.execute("SELECT key, value FROM control_state")
+            rows = cur.fetchall()
+            conn.close()
+            return {r[0]: r[1] for r in rows}
+        except sqlite3.OperationalError as exc:
+            logger.warning(f"[Async DB Unblock] _read_control_state timeout/lock (timeout=0.5s): {exc}. Returning safe default.")
+            return {}
+        except Exception as exc:
+            logger.debug(f"[Async DB Unblock] _read_control_state error: {exc}")
+            return {}
+
+    def _read_override() -> tuple:
+        """Safely queries SQLite for manual override and ghost mode flags with strict timeout."""
+        try:
+            conn = sqlite3.connect("file:logs/trades.db?mode=ro", uri=True, timeout=0.5)
+            cur = conn.cursor()
+            cur.execute("SELECT key, value FROM control_state WHERE key IN ('COMMANDER_OVERRIDE', 'GHOST_MODE')")
+            rows = dict(cur.fetchall())
+            conn.close()
+
+            manual = rows.get("COMMANDER_OVERRIDE") == "True"
+            ghost = rows.get("GHOST_MODE") == "True"
+            return manual, ghost
+        except sqlite3.OperationalError as exc:
+            logger.warning(f"[Async DB Unblock] _read_override timeout/lock (timeout=0.5s): {exc}. Returning safe default (False, False).")
+            return False, False
+        except Exception as exc:
+            logger.debug(f"[Async DB Unblock] _read_override error: {exc}")
+            return False, False
 
     # ── Main async routing loop ────────────────────────────────────────────────
     async def _route_loop():
@@ -338,9 +373,28 @@ def execution_router_process(
         # Launch position monitor as a background task
         asyncio.create_task(_position_monitor(loop))
 
+        last_ctrl_check = 0.0
+        ctrl = {}
         _override_logged = False
 
+        basket_tracking = {}  # basket_id -> {"lot": lot, "symbol": sym, "ticket": ticket}
+        
         while not stop_event.is_set():
+            now = time.time()
+            
+            # Periodically refresh control state (1Hz) — run in executor to avoid blocking event loop
+            if now - last_ctrl_check >= 1.0:
+                try:
+                    ctrl = await loop.run_in_executor(None, _read_control_state)
+                except Exception as exc:
+                    logger.error(f"[Async DB Unblock] Failed to read control_state via executor: {exc}")
+                    ctrl = {}
+                last_ctrl_check = now
+                
+                if ctrl.get("EMERGENCY_STOP") == "True":
+                    logger.critical("🛑 EMERGENCY STOP DETECTED IN CONTROL_STATE. SHUTTING DOWN ROUTER.")
+                    stop_event.set()
+                    break
 
             # Non-blocking dequeue — yield immediately if nothing to process
             try:
@@ -355,6 +409,63 @@ def execution_router_process(
                 # ── Gate: OFI already vetoed by AlphaEngine ─────────────────
                 if not sig.ofi_ok:
                     logger.info(f"[{sym}] OFI VETO — skip execution.")
+                    continue
+
+                # ── Gate: ACTION CLOSE INTERCEPT ──────────────────────────────
+                if getattr(sig, 'action', '') == "CLOSE":
+                    exit_reason = getattr(sig, 'exit_reason', "")
+                    basket_id   = getattr(sig, 'basket_id', "")
+                    
+                    # ── ARCHITECT UPGRADE: The Hammer (Safety Stops Bypass) ──
+                    if exit_reason in ["COINT_BREAKDOWN", "Z_HARD_STOP", "TIME_STOP"]:
+                        logger.critical(f"[ExecRouter] INFO — Force liquidating basket {basket_id} due to {exit_reason}.")
+                        # Ruthlessly bypass the Transaction Cost Trap
+                        target_pos = await loop.run_in_executor(None, mt5.positions_get, sym)
+                        if target_pos:
+                            for pos in target_pos:
+                                await loop.run_in_executor(None, router.close_position, pos, f"FORCE_{exit_reason}")
+                            active_symbols.discard(sym)
+                            logger.info(f"[{sym}] Emergency {exit_reason} slaughter executed.")
+                        else:
+                            active_symbols.discard(sym)
+                        continue
+
+                    # Regular Mean Reversion: Transaction Cost Trap (Net PnL Guard)
+                    if exit_reason == "MEAN_REVERSION" and basket_id:
+                        all_pos = await loop.run_in_executor(None, mt5.positions_get)
+                        basket_pos = [p for p in all_pos if p.comment == basket_id]
+                        
+                        if basket_pos:
+                            # ═══ SAFE PnL SUMMATION WITH BUFFER ═══
+                            MIN_PNL_TO_CLOSE = 0.50  # Hard buffer to cover slippage & late fees
+                            net_pnl = 0.0
+                            
+                            for p in basket_pos:
+                                profit = p.profit if p.profit is not None else 0.0
+                                swap = p.swap if p.swap is not None else 0.0
+                                commission = p.commission if p.commission is not None else 0.0
+                                net_pnl += (profit + swap + commission)
+                                logger.debug(
+                                    f"[PnL] Ticket {p.ticket}: profit={profit:.2f}, swap={swap:.2f}, "
+                                    f"commission={commission:.2f}, running_total={net_pnl:.2f}"
+                                )
+                            
+                            if net_pnl < MIN_PNL_TO_CLOSE:
+                                logger.info(
+                                    f"[{sym}] INFO — Z-Score target reached, but Net PnL ({net_pnl:.2f}) "
+                                    f"is below buffer ({MIN_PNL_TO_CLOSE}). Holding for fee clearance."
+                                )
+                                continue
+
+                    # Proceed with Standard Close if not vetoed
+                    target_pos = await loop.run_in_executor(None, mt5.positions_get, sym)
+                    if target_pos:
+                        for pos in target_pos:
+                            await loop.run_in_executor(None, router.close_position, pos)
+                        active_symbols.discard(sym)
+                        logger.info(f"[{sym}] Mean Reversion exit processed.")
+                    else:
+                        active_symbols.discard(sym)
                     continue
 
                 # ── Gate: already have an open position ───────────────────────
@@ -421,39 +532,155 @@ def execution_router_process(
                     continue
                 equity = acc.equity
 
+                # ── Live tick for entry price & margin check ───────────────
+                # MARGIN TICK BUG FIX: Fetch tick BEFORE margin calculation (was after)
+                tick = await loop.run_in_executor(None, mt5.symbol_info_tick, sym)
+                if tick is None:
+                    logger.warning(f"[{sym}] symbol_info_tick() returned None — skipping.")
+                    continue
+
                 # ── Gate: regime NO_TRADE ─────────────────────────────────────
                 if sig.regime == "NO_TRADE":
                     logger.info(f"[{sym}] NO_TRADE regime (Hurst noise band) — skip.")
                     continue
 
-                # ── Phase 4: Kelly lot size ───────────────────────────────────
-                lot = kelly.lot_size(
-                    equity     = equity,
-                    atr        = sig.atr,
-                    tick_value = info.trade_tick_value,
-                    tick_size  = info.trade_tick_size,
-                    volume_min = info.volume_min,
-                    volume_max = min(info.volume_max, 2.0),
-                )
+                # ── Delta-Neutral Sizing logic ────────────────────────────────
+                basket_id = getattr(sig, 'basket_id', "")
+                beta      = getattr(sig, 'beta', 1.0)
+                leg_role  = getattr(sig, 'leg_role', "")
+                
+                if basket_id:
+                    if leg_role == "PRIMARY":
+                        # Primary Leg: Calculate Kelly sizing
+                        lot = kelly.lot_size(
+                            equity     = equity,
+                            atr        = sig.atr,
+                            tick_value = info.trade_tick_value,
+                            tick_size  = info.trade_tick_size,
+                            volume_min = info.volume_min,
+                            volume_max = min(info.volume_max, 2.0),
+                        )
+                        
+                        # ARCHITECT UPGRADE: Margin Choking (Anti-Bleed)
+                        # Pre-check margin for BOTH legs using hedge metadata
+                        hedge_sym = getattr(sig, 'hedge_symbol', "")
+                        hedge_beta = getattr(sig, 'hedge_beta', 1.0)
+                        hedge_lot = round(max(info.volume_min, lot * hedge_beta), 2)
+                        
+                        try:
+                            # Calculate margin for PRIMARY (assume BUY for check, or use intended signal)
+                            is_buy = getattr(sig, 'signal', 0.0) == 1.0
+                            m_type_p = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+                            m_type_h = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
+                            
+                            margin_p = await loop.run_in_executor(None, mt5.order_calc_margin, m_type_p, sym, lot, tick.ask if is_buy else tick.bid)
+                            margin_h = await loop.run_in_executor(None, mt5.order_calc_margin, m_type_h, hedge_sym, hedge_lot, tick.ask if not is_buy else tick.bid)
+                            
+                            # ═══ STRICT MARGIN TYPE SAFETY ═══
+                            if margin_p is None or margin_h is None:
+                                logger.error(
+                                    f"[{sym}] MT5 returned None for margin calculation. "
+                                    f"Primary={margin_p}, Hedge={margin_h}. "
+                                    f"Aborting to prevent overleveraging."
+                                )
+                                continue
+                            
+                            if margin_p < 0 or margin_h < 0:
+                                logger.error(
+                                    f"[{sym}] MT5 margin calculation returned negative values. "
+                                    f"Primary={margin_p}, Hedge={margin_h}. Aborting."
+                                )
+                                continue
+                            
+                            required_margin = margin_p + margin_h
+                            acc_info = await loop.run_in_executor(None, mt5.account_info)
+                            
+                            logger.info(
+                                f"[Margin] {sym}: Account currency={getattr(acc_info, 'currency', 'N/A')}, "
+                                f"Primary={margin_p:.2f}, Hedge={margin_h:.2f}, "
+                                f"Total={required_margin:.2f}, Free={acc_info.margin_free:.2f}"
+                            )
+                            
+                            if acc_info.margin_free < (required_margin * 1.5):
+                                logger.warning(
+                                    f"[{sym}] WARNING — Insufficient margin for dual-basket. "
+                                    f"Free: {acc_info.margin_free:.2f} | Required (1.5x): {required_margin * 1.5:.2f}. "
+                                    f"Skipping execution."
+                                )
+                                continue
+                        except Exception as m_err:
+                            logger.error(f"[{sym}] Margin check failed: {m_err}. Aborting for safety.")
+                            continue
 
-                # ── Live tick for entry price ─────────────────────────────────
-                tick = await loop.run_in_executor(None, mt5.symbol_info_tick, sym)
-                if tick is None:
-                    continue
+                        logger.info(f"[{sym}] Basket Primary Leg identified. Lot={lot:.2f} | basket_id={basket_id}")
+                    elif leg_role == "HEDGE":
+                        if basket_id not in basket_tracking:
+                            logger.warning(f"[{sym}] Hedge leg arrived but Primary leg state missing for {basket_id}. Skipping.")
+                            continue
+                            
+                        # Secondary Leg: Apply Hedge Ratio (Beta) with volume_step validation
+                        parent_lot = basket_tracking[basket_id]["lot"]
+                        raw_hedge_lot = parent_lot * beta
+                        
+                        # ═══ STRICT MT5 VOLUME_STEP ROUNDING & DELTA-NEUTRAL VERIFICATION ═══
+                        # Enforce MT5 volume_step mathematically (not just round to 2 decimals)
+                        if hasattr(info, 'volume_step') and info.volume_step > 0:
+                            steps = round((raw_hedge_lot - info.volume_min) / info.volume_step)
+                            lot = info.volume_min + (steps * info.volume_step)
+                            lot = round(lot, 8)  # Clean up floating point artifacts
+                        else:
+                            # Fallback if volume_step not available
+                            lot = round(max(info.volume_min, raw_hedge_lot), 2)
+                        
+                        lot = max(info.volume_min, min(lot, info.volume_max))  # Enforce bounds
+                        
+                        # Delta-Neutral Ratio Verification
+                        actual_ratio = lot / parent_lot if parent_lot > 0 else 0
+                        ratio_error = abs(actual_ratio - beta) / beta if beta > 0 else 0
+                        
+                        if ratio_error > 0.15:  # 15% tolerance (critical deviation)
+                            logger.error(
+                                f"[{sym}] CRITICAL: Hedge ratio deviation too high ({ratio_error*100:.1f}%). "
+                                f"Primary: {parent_lot:.4f}, Hedge: {lot:.4f}, Expected β: {beta:.4f}, "
+                                f"Actual ratio: {actual_ratio:.4f}. Aborting hedge to prevent unbalanced basket."
+                            )
+                            continue
+                        
+                        if ratio_error > 0.05:  # 5% tolerance (warning only)
+                            logger.warning(
+                                f"[{sym}] Hedge ratio deviation: {ratio_error*100:.1f}% "
+                                f"(Primary={parent_lot:.4f}, Hedge={lot:.4f}, β={beta:.4f})"
+                            )
+                        
+                        logger.info(
+                            f"[{sym}] Basket Hedge Leg identified. "
+                            f"Raw={raw_hedge_lot:.4f} → Final={lot:.4f}, "
+                            f"Ratio error={ratio_error*100:.2f}%, basket_id={basket_id}"
+                        )
+                    else:
+                        # Fallback for old signals
+                        logger.warning(f"[{sym}] Basket signal missing leg_role. Skipping.")
+                        continue
+                else:
+                    # Fallback for standard signals
+                    lot = kelly.lot_size(
+                        equity     = equity,
+                        atr        = sig.atr,
+                        tick_value = info.trade_tick_value,
+                        tick_size  = info.trade_tick_size,
+                        volume_min = info.volume_min,
+                        volume_max = min(info.volume_max, 2.0),
+                    )
 
-                is_buy = sig.direction == 1.0
+                # ── Tick already fetched above for margin check ─────────────────
+                is_buy = getattr(sig, 'signal', 0.0) == 1.0
                 price  = tick.ask if is_buy else tick.bid
                 atr    = sig.atr
 
-                # TP and SL based on regime
-                if sig.regime == "RANGING":
-                    # Mean reversion: tighter TP, wider SL
-                    tp = price + (atr * 2.0) if is_buy else price - (atr * 2.0)
-                    sl = price - (atr * 2.5) if is_buy else price + (atr * 2.5)
-                else:
-                    # Momentum: 3:1 reward-to-risk
-                    tp = price + (atr * 3.0) if is_buy else price - (atr * 3.0)
-                    sl = price - (atr * 2.5) if is_buy else price + (atr * 2.5)
+                # StatArb exit logic is managed by AlphaEngine (Z-score mean reversion),
+                # so we set wide ATR-based safety guards here.
+                tp = price + (atr * 10.0) if is_buy else price - (atr * 10.0)
+                sl = price - (atr * 5.0)  if is_buy else price + (atr * 5.0)
 
                 # MT5 Minimum Lot Safety Clamp
                 if lot < info.volume_min:
@@ -463,10 +690,145 @@ def execution_router_process(
 
                 logger.info(
                     f"[{sym}] ✅ SIGNAL CONFIRMED | dir={'BUY' if is_buy else 'SELL'} | "
-                    f"H={sig.hurst:.3f} | regime={sig.regime} | "
+                    f"Z={sig.z_score:.3f} | regime={sig.regime} | "
                     f"lot={lot:.2f} | K½={kelly.kelly_fraction():.4f} | "
                     f"OFI=CLEAR"
                 )
+
+                # ══════════════════════════════════════════════════════════════════════
+                # 🚨 RED TEAM TRIGGER: Gap Risk / Margin Collapse Defense on HEDGE 🚨
+                # ══════════════════════════════════════════════════════════════════════
+                if leg_role == "HEDGE":
+                    logger.warning(f"[{sym}] HEDGE leg detected — executing gap risk pre-flight defense…")
+                    
+                    # Step 1: Fetch live tick for hedge symbol (NOT cached from PRIMARY check)
+                    hedge_tick = await loop.run_in_executor(None, mt5.symbol_info_tick, sym)
+                    if hedge_tick is None:
+                        logger.critical(
+                            f"[{sym}] 🚨 HEDGE gap defense: symbol_info_tick returned None. "
+                            f"Cannot verify current market price. ABORTING HEDGE LEG."
+                        )
+                        active_symbols.discard(sym)
+                        continue
+                    
+                    # Step 2: Fetch current account info to detect margin collapse
+                    acc_info_current = await loop.run_in_executor(None, mt5.account_info)
+                    if acc_info_current is None:
+                        logger.critical(
+                            f"[{sym}] 🚨 HEDGE gap defense: account_info returned None. "
+                            f"Cannot verify margin state. ABORTING HEDGE LEG."
+                        )
+                        active_symbols.discard(sym)
+                        continue
+                    
+                    # Step 3: Calculate exact margin required at CURRENT market price (not stale)
+                    hedge_price = hedge_tick.ask if not is_buy else hedge_tick.bid
+                    m_type_hedge = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
+                    
+                    margin_h_current = await loop.run_in_executor(
+                        None,
+                        mt5.order_calc_margin,
+                        m_type_hedge, sym, lot, hedge_price
+                    )
+                    
+                    if margin_h_current is None:
+                        logger.critical(
+                            f"[{sym}] 🚨 HEDGE gap defense: order_calc_margin returned None. "
+                            f"Cannot verify margin requirement. ABORTING HEDGE LEG."
+                        )
+                        active_symbols.discard(sym)
+                        continue
+                    
+                    # Step 4: Evaluate safety buffer (1.5x cushion = 33% margin headroom)
+                    margin_required_with_buffer = margin_h_current * 1.5
+                    
+                    if acc_info_current.margin_free < margin_required_with_buffer:
+                        logger.critical(
+                            f"🚨 🚨 🚨 [RED TEAM TRIGGER] [{sym}] 🚨 🚨 🚨\n"
+                            f"   MARGIN COLLAPSE DETECTED BETWEEN PRIMARY AND HEDGE EXECUTION!\n"
+                            f"   Available margin: ${acc_info_current.margin_free:.2f}\n"
+                            f"   Required (1.5x): ${margin_required_with_buffer:.2f}\n"
+                            f"   Shortfall: ${margin_required_with_buffer - acc_info_current.margin_free:.2f}\n"
+                            f"   Basket ID: {basket_id}\n"
+                            f"   >>> INITIATING EMERGENCY ATOMIC ROLLBACK ON PRIMARY LEG <<<\n"
+                        )
+                        
+                        # ──── ATOMIC ROLLBACK: Fetch parent position and close immediately ────
+                        if basket_id in basket_tracking:
+                            parent_ticket = basket_tracking[basket_id].get("ticket")
+                            parent_symbol = basket_tracking[basket_id].get("symbol")
+                            
+                            if parent_ticket and parent_symbol:
+                                try:
+                                    logger.critical(
+                                        f"[ATOMIC ROLLBACK] Fetching parent position for immediate closure…\n"
+                                        f"   Ticket: {parent_ticket}, Symbol: {parent_symbol}, Basket: {basket_id}"
+                                    )
+                                    
+                                    # Fetch the specific position by ticket
+                                    all_positions = await loop.run_in_executor(None, mt5.positions_get)
+                                    parent_position = None
+                                    
+                                    if all_positions:
+                                        for pos in all_positions:
+                                            if pos.ticket == parent_ticket and pos.symbol == parent_symbol:
+                                                parent_position = pos
+                                                break
+                                    
+                                    if parent_position:
+                                        # Close the parent position immediately
+                                        rollback_result = await loop.run_in_executor(
+                                            None,
+                                            router.close_position,
+                                            parent_position,
+                                            f"ATOMIC_ROLLBACK_gap_defense_{basket_id}"
+                                        )
+                                        
+                                        if rollback_result and rollback_result.retcode == mt5.TRADE_RETCODE_DONE:
+                                            logger.critical(
+                                                f"✅ [ATOMIC ROLLBACK] SUCCESS: Parent position CLOSED.\n"
+                                                f"   Ticket: {parent_ticket}, Symbol: {parent_symbol}\n"
+                                                f"   Close price: {rollback_result.price:.5f}\n"
+                                                f"   Basket {basket_id} eliminated."
+                                            )
+                                        else:
+                                            logger.critical(
+                                                f"⚠️  [ATOMIC ROLLBACK] Close attempt returned status: {rollback_result.retcode if rollback_result else 'NONE'}\n"
+                                                f"   Position may still be open. Removing from tracking."
+                                            )
+                                    else:
+                                        logger.critical(
+                                            f"⚠️  [ATOMIC ROLLBACK] Parent position NOT FOUND in mt5.positions_get().\n"
+                                            f"   Expected: Ticket {parent_ticket}, Symbol {parent_symbol}.\n"
+                                            f"   Position may have closed externally. Clearing from tracking."
+                                        )
+                                
+                                except Exception as rb_err:
+                                    logger.critical(
+                                        f"🚨 [ATOMIC ROLLBACK] Exception during parent close: {rb_err}\n"
+                                        f"   Position state unknown. Clearing basket anyway."
+                                    )
+                            
+                            # Clean up basket tracking (PRIMARY no longer exists)
+                            del basket_tracking[basket_id]
+                            logger.critical(f"[ATOMIC ROLLBACK] Basket {basket_id} removed from tracking.")
+                        
+                        # Abort hedge execution
+                        active_symbols.discard(sym)
+                        logger.critical(
+                            f"🚨 [HEDGE ABORTED] Hedge leg execution cancelled due to margin collapse.\n"
+                            f"   Primary leg has been forcefully closed via atomic rollback.\n"
+                            f"   System is now in safe state (no unhedged basket)."
+                        )
+                        continue
+                    
+                    else:
+                        logger.info(
+                            f"✅ [HEDGE GAP DEFENSE PASSED] Margin verification succeeded:\n"
+                            f"   Available: ${acc_info_current.margin_free:.2f}\n"
+                            f"   Required (1.5x): ${margin_required_with_buffer:.2f}\n"
+                            f"   Safety buffer OK. Proceeding to execution."
+                        )
 
                 # ── Fire async market order ───────────────────────────────────
                 active_symbols.add(sym)
@@ -474,7 +836,7 @@ def execution_router_process(
                     res_tuple = await loop.run_in_executor(
                         None,
                         router.execute_market,
-                        sym, is_buy, lot, atr, tp, sl
+                        sym, is_buy, lot, atr, tp, sl, basket_id
                     )
 
                     if isinstance(res_tuple, tuple) and len(res_tuple) == 2:
@@ -503,7 +865,7 @@ def execution_router_process(
 
                         io_queue.put_nowait({
                             "symbol":    sym,
-                            "direction": sig.direction,
+                            "direction": getattr(sig, 'signal', 0.0),
                             "lot":       lot,
                             "price":     result.price,
                             "ticket":    result.deal,
@@ -511,12 +873,23 @@ def execution_router_process(
                             "sl":        sl,
                             "timestamp": time.time(),
                             "kelly":     kelly.kelly_fraction(),
-                            "hurst":     sig.hurst,
+                            "z_score":   sig.z_score,
                         })
                         logger.info(
                             f"[{sym}] Order filled — ticket #{result.deal} | "
                             f"price={result.price:.5f} | trade record queued for DB."
                         )
+
+                        # ATOMIC TRACKING: Store Primary leg for rollback if needed
+                        if basket_id and leg_role == "PRIMARY":
+                            basket_tracking[basket_id] = {
+                                "symbol": sym,
+                                "lot":    lot,
+                                "ticket": result.deal
+                            }
+                        elif basket_id and leg_role == "HEDGE":
+                            if basket_id in basket_tracking:
+                                del basket_tracking[basket_id]
                     else:
                         retcode = result.retcode if result else "None"
                         logger.warning(
@@ -524,6 +897,32 @@ def execution_router_process(
                             "Releasing position lock."
                         )
                         active_symbols.discard(sym)
+
+                        # ATOMIC ROLLBACK: If Hedge leg fails, liquidate Primary leg
+                        if basket_id and leg_role == "HEDGE":
+                            if basket_id in basket_tracking:
+                                primary_info = basket_tracking[basket_id]
+                                logger.critical(
+                                    f"CRITICAL — [BASKET FAILED] Leg B ({sym}) rejected (retcode={retcode}). "
+                                    f"Initiating emergency atomic rollback on Leg A ({primary_info['symbol']})."
+                                )
+                                try:
+                                    p_ticket = primary_info["ticket"]
+                                    p_pos = await loop.run_in_executor(None, mt5.positions_get, ticket=p_ticket)
+                                    if p_pos:
+                                        await loop.run_in_executor(
+                                            None, router.close_position, p_pos[0], 
+                                            f"ROLLBACK:{basket_id}"
+                                        )
+                                        active_symbols.discard(primary_info["symbol"])
+                                        logger.info(f"[{primary_info['symbol']}] Atomic Rollback successful.")
+                                    else:
+                                        logger.error(f"Failed to find Primary position {p_ticket} for rollback!")
+                                except Exception as rollback_err:
+                                    logger.error(f"Atomic Rollback FAILED: {rollback_err}")
+                                finally:
+                                    if basket_id in basket_tracking:
+                                        del basket_tracking[basket_id]
 
                 except Exception as exc:
                     logger.error(f"[{sym}] Order execution error: {exc}", exc_info=True)

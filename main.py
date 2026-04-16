@@ -17,6 +17,8 @@ Critical Windows note:
 import os
 import sys
 import time
+import signal
+import atexit
 import threading
 import multiprocessing as mp
 from multiprocessing.shared_memory import SharedMemory
@@ -30,6 +32,7 @@ from core.data_feeder      import data_feeder_process,     FIELDS_PER_SYMBOL, BY
 from core.alpha_engine     import alpha_engine_process
 from core.execution_router import execution_router_process
 from core.db_writer        import db_writer_daemon
+from core.db_schema        import initialize_database
 from core.shadow_optimizer import run_shadow_optimizer
 import ctypes
 
@@ -62,6 +65,10 @@ def supervisor_main() -> None:
     logger.info("   Phase 5: Zero-Blocking DB I/O                            ")
     logger.info("═" * 66)
 
+    # ── Database Initialization ───────────────────────────────────────────────
+    logger.info("Verifying database schema…")
+    initialize_database()
+
     # ── Symbol discovery (main process only — then released immediately) ──────
     logger.info("Connecting to MT5 for symbol discovery…")
     if not initialize_mt5(login=MT5_ACCOUNT, password=MT5_PASSWORD, server=MT5_SERVER):
@@ -70,11 +77,22 @@ def supervisor_main() -> None:
         return
 
     active_symbols = get_active_symbols()
+    
+    # ── StatArb Compliance ───────────────────────────────────────────────────
+    # Ensure all symbols required for pairs trading are in the monitoring list
+    from core.alpha_engine import TRADABLE_PAIRS
+    pair_symbols = set()
+    for a, b in TRADABLE_PAIRS:
+        pair_symbols.add(a)
+        pair_symbols.add(b)
+    
+    active_symbols = sorted(list(set(active_symbols) | pair_symbols))
+    
     if not active_symbols:
         logger.warning(
             f"No dynamic symbols found. Falling back to config default: {SYMBOLS}"
         )
-        active_symbols = SYMBOLS
+        active_symbols = sorted(list(set(SYMBOLS) | pair_symbols))
 
     # Release main-process MT5 — each subprocess owns its own connection
     shutdown_mt5()
@@ -84,6 +102,15 @@ def supervisor_main() -> None:
     n_syms   = len(active_symbols)
     shm_size = max(n_syms * BYTES_PER_SYMBOL, 64)   # minimum 64 bytes guard
     shm_name = f"omega_ticks_{os.getpid()}"
+
+    # ── Unlink stale SharedMemory blocks on startup ────────────────────────────
+    try:
+        stale_shm = SharedMemory(name=shm_name)
+        stale_shm.close()
+        stale_shm.unlink()
+        logger.info(f"Cleaned up stale SharedMemory: {shm_name}")
+    except FileNotFoundError:
+        pass  # No stale block, OK
 
     try:
         shm = SharedMemory(create=True, size=shm_size, name=shm_name)
@@ -105,15 +132,15 @@ def supervisor_main() -> None:
     io_queue     = mp.Queue(maxsize=5000)   # ExecRouter  → DB Writer
 
     # ── Live Parameters (Shadow Optimizer → Alpha Engine) ──────────────────────
-    # Array of 2 doubles: [0] = Hurst Threshold, [1] = ATR Multiplier
-    # Default seeds: Hurst > 0.60, ATR = 0.25
-    live_params = mp.Array(ctypes.c_double, [0.60, 0.25]) 
+    # Array of 2 doubles: [0] = Z_ENTRY_THRESHOLD, [1] = Z_EXIT_THRESHOLD
+    # Default seeds: Entry > 2.5, Exit < 0.2
+    live_params = mp.Array(ctypes.c_double, [2.5, 0.2]) 
 
     # ── Process instantiation ─────────────────────────────────────────────────
     p_feeder = mp.Process(
         target = data_feeder_process,
         name   = "DataFeeder",
-        daemon = True,
+        daemon = False,
         args   = (
             active_symbols, shm_name, sym_index,
             stop_event,
@@ -125,7 +152,7 @@ def supervisor_main() -> None:
     p_alpha = mp.Process(
         target = alpha_engine_process,
         name   = "AlphaEngine",
-        daemon = True,
+        daemon = False,
         args   = (
             active_symbols, shm_name, sym_index,
             signal_queue, stop_event,
@@ -138,14 +165,14 @@ def supervisor_main() -> None:
     p_shadow = mp.Process(
         target = run_shadow_optimizer,
         name   = "ShadowOptimizer",
-        daemon = True,
+        daemon = False,
         args   = (live_params, stop_event),
     )
 
     p_router = mp.Process(
         target = execution_router_process,
         name   = "ExecRouter",
-        daemon = True,
+        daemon = False,
         args   = (
             signal_queue, io_queue, stop_event,
             MT5_ACCOUNT, MT5_PASSWORD, MT5_SERVER,
@@ -191,6 +218,15 @@ def supervisor_main() -> None:
     logger.info("═" * 66)
     logger.info("Ω  ALL OMEGA PROCESSES LIVE. Supervisor entering health monitor.")
     logger.info("═" * 66)
+
+    # ── Signal handlers for graceful shutdown ──────────────────────────────────
+    def signal_handler(signum, frame):
+        sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+        logger.info(f"Signal {sig_name} ({signum}) received, initiating graceful shutdown.")
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
 
     # ── Supervisor health loop ─────────────────────────────────────────────────
     procs = [

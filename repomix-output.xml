@@ -1,0 +1,3918 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.gitignore
+backtest/__init__.py
+backtest/engine.py
+config.json
+core/__init__.py
+core/alpha_engine.py
+core/data_feeder.py
+core/db_schema.py
+core/db_writer.py
+core/execution_router.py
+core/shadow_optimizer.py
+dashboard.py
+execution/__init__.py
+execution/mt5_client.py
+execution/router.py
+frontend/.gitignore
+frontend/eslint.config.js
+frontend/package.json
+frontend/public/favicon.svg
+frontend/public/icons.svg
+frontend/README.md
+frontend/src/App.css
+frontend/src/App.jsx
+frontend/src/assets/hero.png
+frontend/src/assets/react.svg
+frontend/src/assets/vite.svg
+frontend/src/components/BrainView.jsx
+frontend/src/components/ControlPad.jsx
+frontend/src/components/EquityChart.jsx
+frontend/src/components/LiveTrades.jsx
+frontend/src/components/RiskPanel.jsx
+frontend/src/components/TerminalLog.jsx
+frontend/src/index.css
+frontend/src/main.jsx
+frontend/tailwind.config.js
+frontend/vite.config.js
+launch_dashboard.py
+main.py
+pyrightconfig.json
+requirements.txt
+utils/__init__.py
+utils/config.py
+utils/logger.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="core/db_schema.py">
+import sqlite3
+import os
+
+def initialize_database(db_path='logs/trades.db'):
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    # Original trades table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp REAL,
+        symbol TEXT,
+        direction REAL,
+        lot REAL,
+        price REAL,
+        ticket INTEGER,
+        tp REAL,
+        sl REAL,
+        kelly REAL,
+        hurst REAL,
+        pnl REAL
+    )
+    ''')
+
+    # New signals tracking table for Omega dashboard
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp REAL,
+        symbol TEXT,
+        regime TEXT,
+        hurst REAL,
+        z_score REAL,
+        confidence REAL
+    )
+    ''')
+
+    # New Control state table for UI Overrides
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS control_state (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+    ''')
+
+    conn.commit()
+    conn.close()
+    print("Database schema successfully generated/verified.")
+
+if __name__ == "__main__":
+    initialize_database()
+</file>
+
+<file path="frontend/.gitignore">
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+</file>
+
+<file path="frontend/eslint.config.js">
+import js from '@eslint/js'
+import globals from 'globals'
+import reactHooks from 'eslint-plugin-react-hooks'
+import reactRefresh from 'eslint-plugin-react-refresh'
+import { defineConfig, globalIgnores } from 'eslint/config'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{js,jsx}'],
+    extends: [
+      js.configs.recommended,
+      reactHooks.configs.flat.recommended,
+      reactRefresh.configs.vite,
+    ],
+    languageOptions: {
+      ecmaVersion: 2020,
+      globals: globals.browser,
+      parserOptions: {
+        ecmaVersion: 'latest',
+        ecmaFeatures: { jsx: true },
+        sourceType: 'module',
+      },
+    },
+    rules: {
+      'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+    },
+  },
+])
+</file>
+
+<file path="frontend/package.json">
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --force",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lightweight-charts": "^4.1.1",
+    "lucide-react": "^1.8.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@tailwindcss/postcss": "^4.2.2",
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "autoprefixer": "^10.4.27",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.4.0",
+    "postcss": "^8.5.9",
+    "tailwindcss": "^4.2.2",
+    "vite": "^8.0.4"
+  }
+}
+</file>
+
+<file path="frontend/public/favicon.svg">
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="46" fill="none" viewBox="0 0 48 46"><path fill="#863bff" d="M25.946 44.938c-.664.845-2.021.375-2.021-.698V33.937a2.26 2.26 0 0 0-2.262-2.262H10.287c-.92 0-1.456-1.04-.92-1.788l7.48-10.471c1.07-1.497 0-3.578-1.842-3.578H1.237c-.92 0-1.456-1.04-.92-1.788L10.013.474c.214-.297.556-.474.92-.474h28.894c.92 0 1.456 1.04.92 1.788l-7.48 10.471c-1.07 1.498 0 3.579 1.842 3.579h11.377c.943 0 1.473 1.088.89 1.83L25.947 44.94z" style="fill:#863bff;fill:color(display-p3 .5252 .23 1);fill-opacity:1"/><mask id="a" width="48" height="46" x="0" y="0" maskUnits="userSpaceOnUse" style="mask-type:alpha"><path fill="#000" d="M25.842 44.938c-.664.844-2.021.375-2.021-.698V33.937a2.26 2.26 0 0 0-2.262-2.262H10.183c-.92 0-1.456-1.04-.92-1.788l7.48-10.471c1.07-1.498 0-3.579-1.842-3.579H1.133c-.92 0-1.456-1.04-.92-1.787L9.91.473c.214-.297.556-.474.92-.474h28.894c.92 0 1.456 1.04.92 1.788l-7.48 10.471c-1.07 1.498 0 3.578 1.842 3.578h11.377c.943 0 1.473 1.088.89 1.832L25.843 44.94z" style="fill:#000;fill-opacity:1"/></mask><g mask="url(#a)"><g filter="url(#b)"><ellipse cx="5.508" cy="14.704" fill="#ede6ff" rx="5.508" ry="14.704" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -4.47 31.516)"/></g><g filter="url(#c)"><ellipse cx="10.399" cy="29.851" fill="#ede6ff" rx="10.399" ry="29.851" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -39.328 7.883)"/></g><g filter="url(#d)"><ellipse cx="5.508" cy="30.487" fill="#7e14ff" rx="5.508" ry="30.487" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.814 -25.913 -14.639)scale(1 -1)"/></g><g filter="url(#e)"><ellipse cx="5.508" cy="30.599" fill="#7e14ff" rx="5.508" ry="30.599" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.814 -32.644 -3.334)scale(1 -1)"/></g><g filter="url(#f)"><ellipse cx="5.508" cy="30.599" fill="#7e14ff" rx="5.508" ry="30.599" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -34.34 30.47)"/></g><g filter="url(#g)"><ellipse cx="14.072" cy="22.078" fill="#ede6ff" rx="14.072" ry="22.078" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="rotate(93.35 24.506 48.493)scale(-1 1)"/></g><g filter="url(#h)"><ellipse cx="3.47" cy="21.501" fill="#7e14ff" rx="3.47" ry="21.501" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.009 28.708 47.59)scale(-1 1)"/></g><g filter="url(#i)"><ellipse cx="3.47" cy="21.501" fill="#7e14ff" rx="3.47" ry="21.501" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.009 28.708 47.59)scale(-1 1)"/></g><g filter="url(#j)"><ellipse cx=".387" cy="8.972" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(39.51 .387 8.972)"/></g><g filter="url(#k)"><ellipse cx="47.523" cy="-6.092" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 47.523 -6.092)"/></g><g filter="url(#l)"><ellipse cx="41.412" cy="6.333" fill="#47bfff" rx="5.971" ry="9.665" style="fill:#47bfff;fill:color(display-p3 .2799 .748 1);fill-opacity:1" transform="rotate(37.892 41.412 6.333)"/></g><g filter="url(#m)"><ellipse cx="-1.879" cy="38.332" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 -1.88 38.332)"/></g><g filter="url(#n)"><ellipse cx="-1.879" cy="38.332" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 -1.88 38.332)"/></g><g filter="url(#o)"><ellipse cx="35.651" cy="29.907" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 35.651 29.907)"/></g><g filter="url(#p)"><ellipse cx="38.418" cy="32.4" fill="#47bfff" rx="5.971" ry="15.297" style="fill:#47bfff;fill:color(display-p3 .2799 .748 1);fill-opacity:1" transform="rotate(37.892 38.418 32.4)"/></g></g><defs><filter id="b" width="60.045" height="41.654" x="-19.77" y="16.149" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="c" width="90.34" height="51.437" x="-54.613" y="-7.533" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="d" width="79.355" height="29.4" x="-49.64" y="2.03" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="e" width="79.579" height="29.4" x="-45.045" y="20.029" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="f" width="79.579" height="29.4" x="-43.513" y="21.178" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="g" width="74.749" height="58.852" x="15.756" y="-17.901" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="h" width="61.377" height="25.362" x="23.548" y="2.284" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="i" width="61.377" height="25.362" x="23.548" y="2.284" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="j" width="56.045" height="63.649" x="-27.636" y="-22.853" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="k" width="54.814" height="64.646" x="20.116" y="-38.415" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="l" width="33.541" height="35.313" x="24.641" y="-11.323" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="m" width="54.814" height="64.646" x="-29.286" y="6.009" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="n" width="54.814" height="64.646" x="-29.286" y="6.009" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="o" width="54.814" height="64.646" x="8.244" y="-2.416" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="p" width="39.409" height="43.623" x="18.713" y="10.588" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter></defs></svg>
+</file>
+
+<file path="frontend/public/icons.svg">
+<svg xmlns="http://www.w3.org/2000/svg">
+  <symbol id="bluesky-icon" viewBox="0 0 16 17">
+    <g clip-path="url(#bluesky-clip)"><path fill="#08060d" d="M7.75 7.735c-.693-1.348-2.58-3.86-4.334-5.097-1.68-1.187-2.32-.981-2.74-.79C.188 2.065.1 2.812.1 3.251s.241 3.602.398 4.13c.52 1.744 2.367 2.333 4.07 2.145-2.495.37-4.71 1.278-1.805 4.512 3.196 3.309 4.38-.71 4.987-2.746.608 2.036 1.307 5.91 4.93 2.746 2.72-2.746.747-4.143-1.747-4.512 1.702.189 3.55-.4 4.07-2.145.156-.528.397-3.691.397-4.13s-.088-1.186-.575-1.406c-.42-.19-1.06-.395-2.741.79-1.755 1.24-3.64 3.752-4.334 5.099"/></g>
+    <defs><clipPath id="bluesky-clip"><path fill="#fff" d="M.1.85h15.3v15.3H.1z"/></clipPath></defs>
+  </symbol>
+  <symbol id="discord-icon" viewBox="0 0 20 19">
+    <path fill="#08060d" d="M16.224 3.768a14.5 14.5 0 0 0-3.67-1.153c-.158.286-.343.67-.47.976a13.5 13.5 0 0 0-4.067 0c-.128-.306-.317-.69-.476-.976A14.4 14.4 0 0 0 3.868 3.77C1.546 7.28.916 10.703 1.231 14.077a14.7 14.7 0 0 0 4.5 2.306q.545-.748.965-1.587a9.5 9.5 0 0 1-1.518-.74q.191-.14.372-.293c2.927 1.369 6.107 1.369 8.999 0q.183.152.372.294-.723.437-1.52.74.418.838.963 1.588a14.6 14.6 0 0 0 4.504-2.308c.37-3.911-.63-7.302-2.644-10.309m-9.13 8.234c-.878 0-1.599-.82-1.599-1.82 0-.998.705-1.82 1.6-1.82.894 0 1.614.82 1.599 1.82.001 1-.705 1.82-1.6 1.82m5.91 0c-.878 0-1.599-.82-1.599-1.82 0-.998.705-1.82 1.6-1.82.893 0 1.614.82 1.599 1.82 0 1-.706 1.82-1.6 1.82"/>
+  </symbol>
+  <symbol id="documentation-icon" viewBox="0 0 21 20">
+    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="m15.5 13.333 1.533 1.322c.645.555.967.833.967 1.178s-.322.623-.967 1.179L15.5 18.333m-3.333-5-1.534 1.322c-.644.555-.966.833-.966 1.178s.322.623.966 1.179l1.534 1.321"/>
+    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="M17.167 10.836v-4.32c0-1.41 0-2.117-.224-2.68-.359-.906-1.118-1.621-2.08-1.96-.599-.21-1.349-.21-2.848-.21-2.623 0-3.935 0-4.983.369-1.684.591-3.013 1.842-3.641 3.428C3 6.449 3 7.684 3 10.154v2.122c0 2.558 0 3.838.706 4.726q.306.383.713.671c.76.536 1.79.64 3.581.66"/>
+    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="M3 10a2.78 2.78 0 0 1 2.778-2.778c.555 0 1.209.097 1.748-.047.48-.129.854-.503.982-.982.145-.54.048-1.194.048-1.749a2.78 2.78 0 0 1 2.777-2.777"/>
+  </symbol>
+  <symbol id="github-icon" viewBox="0 0 19 19">
+    <path fill="#08060d" fill-rule="evenodd" d="M9.356 1.85C5.05 1.85 1.57 5.356 1.57 9.694a7.84 7.84 0 0 0 5.324 7.44c.387.079.528-.168.528-.376 0-.182-.013-.805-.013-1.454-2.165.467-2.616-.935-2.616-.935-.349-.91-.864-1.143-.864-1.143-.71-.48.051-.48.051-.48.787.051 1.2.805 1.2.805.695 1.194 1.817.857 2.268.649.064-.507.27-.857.49-1.052-1.728-.182-3.545-.857-3.545-3.87 0-.857.31-1.558.8-2.104-.078-.195-.349-1 .077-2.078 0 0 .657-.208 2.14.805a7.5 7.5 0 0 1 1.946-.26c.657 0 1.328.092 1.946.26 1.483-1.013 2.14-.805 2.14-.805.426 1.078.155 1.883.078 2.078.502.546.799 1.247.799 2.104 0 3.013-1.818 3.675-3.558 3.87.284.247.528.714.528 1.454 0 1.052-.012 1.896-.012 2.156 0 .208.142.455.528.377a7.84 7.84 0 0 0 5.324-7.441c.013-4.338-3.48-7.844-7.773-7.844" clip-rule="evenodd"/>
+  </symbol>
+  <symbol id="social-icon" viewBox="0 0 20 20">
+    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="M12.5 6.667a4.167 4.167 0 1 0-8.334 0 4.167 4.167 0 0 0 8.334 0"/>
+    <path fill="none" stroke="#aa3bff" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.35" d="M2.5 16.667a5.833 5.833 0 0 1 8.75-5.053m3.837.474.513 1.035c.07.144.257.282.414.309l.93.155c.596.1.736.536.307.965l-.723.73a.64.64 0 0 0-.152.531l.207.903c.164.715-.213.991-.84.618l-.872-.52a.63.63 0 0 0-.577 0l-.872.52c-.624.373-1.003.094-.84-.618l.207-.903a.64.64 0 0 0-.152-.532l-.723-.729c-.426-.43-.289-.864.306-.964l.93-.156a.64.64 0 0 0 .412-.31l.513-1.034c.28-.562.735-.562 1.012 0"/>
+  </symbol>
+  <symbol id="x-icon" viewBox="0 0 19 19">
+    <path fill="#08060d" fill-rule="evenodd" d="M1.893 1.98c.052.072 1.245 1.769 2.653 3.77l2.892 4.114c.183.261.333.48.333.486s-.068.089-.152.183l-.522.593-.765.867-3.597 4.087c-.375.426-.734.834-.798.905a1 1 0 0 0-.118.148c0 .01.236.017.664.017h.663l.729-.83c.4-.457.796-.906.879-.999a692 692 0 0 0 1.794-2.038c.034-.037.301-.34.594-.675l.551-.624.345-.392a7 7 0 0 1 .34-.374c.006 0 .93 1.306 2.052 2.903l2.084 2.965.045.063h2.275c1.87 0 2.273-.003 2.266-.021-.008-.02-1.098-1.572-3.894-5.547-2.013-2.862-2.28-3.246-2.273-3.266.008-.019.282-.332 2.085-2.38l2-2.274 1.567-1.782c.022-.028-.016-.03-.65-.03h-.674l-.3.342a871 871 0 0 1-1.782 2.025c-.067.075-.405.458-.75.852a100 100 0 0 1-.803.91c-.148.172-.299.344-.99 1.127-.304.343-.32.358-.345.327-.015-.019-.904-1.282-1.976-2.808L6.365 1.85H1.8zm1.782.91 8.078 11.294c.772 1.08 1.413 1.973 1.425 1.984.016.017.241.02 1.05.017l1.03-.004-2.694-3.766L7.796 5.75 5.722 2.852l-1.039-.004-1.039-.004z" clip-rule="evenodd"/>
+  </symbol>
+</svg>
+</file>
+
+<file path="frontend/README.md">
+# React + Vite
+
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+
+Currently, two official plugins are available:
+
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+
+## React Compiler
+
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+
+## Expanding the ESLint configuration
+
+If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+</file>
+
+<file path="frontend/src/App.css">
+.counter {
+  font-size: 16px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 2px solid transparent;
+  transition: border-color 0.3s;
+  margin-bottom: 24px;
+
+  &:hover {
+    border-color: var(--accent-border);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+.hero {
+  position: relative;
+
+  .base,
+  .framework,
+  .vite {
+    inset-inline: 0;
+    margin: 0 auto;
+  }
+
+  .base {
+    width: 170px;
+    position: relative;
+    z-index: 0;
+  }
+
+  .framework,
+  .vite {
+    position: absolute;
+  }
+
+  .framework {
+    z-index: 1;
+    top: 34px;
+    height: 28px;
+    transform: perspective(2000px) rotateZ(300deg) rotateX(44deg) rotateY(39deg)
+      scale(1.4);
+  }
+
+  .vite {
+    z-index: 0;
+    top: 107px;
+    height: 26px;
+    width: auto;
+    transform: perspective(2000px) rotateZ(300deg) rotateX(40deg) rotateY(39deg)
+      scale(0.8);
+  }
+}
+
+#center {
+  display: flex;
+  flex-direction: column;
+  gap: 25px;
+  place-content: center;
+  place-items: center;
+  flex-grow: 1;
+
+  @media (max-width: 1024px) {
+    padding: 32px 20px 24px;
+    gap: 18px;
+  }
+}
+
+#next-steps {
+  display: flex;
+  border-top: 1px solid var(--border);
+  text-align: left;
+
+  & > div {
+    flex: 1 1 0;
+    padding: 32px;
+    @media (max-width: 1024px) {
+      padding: 24px 20px;
+    }
+  }
+
+  .icon {
+    margin-bottom: 16px;
+    width: 22px;
+    height: 22px;
+  }
+
+  @media (max-width: 1024px) {
+    flex-direction: column;
+    text-align: center;
+  }
+}
+
+#docs {
+  border-right: 1px solid var(--border);
+
+  @media (max-width: 1024px) {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+#next-steps ul {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  gap: 8px;
+  margin: 32px 0 0;
+
+  .logo {
+    height: 18px;
+  }
+
+  a {
+    color: var(--text-h);
+    font-size: 16px;
+    border-radius: 6px;
+    background: var(--social-bg);
+    display: flex;
+    padding: 6px 12px;
+    align-items: center;
+    gap: 8px;
+    text-decoration: none;
+    transition: box-shadow 0.3s;
+
+    &:hover {
+      box-shadow: var(--shadow);
+    }
+    .button-icon {
+      height: 18px;
+      width: 18px;
+    }
+  }
+
+  @media (max-width: 1024px) {
+    margin-top: 20px;
+    flex-wrap: wrap;
+    justify-content: center;
+
+    li {
+      flex: 1 1 calc(50% - 8px);
+    }
+
+    a {
+      width: 100%;
+      justify-content: center;
+      box-sizing: border-box;
+    }
+  }
+}
+
+#spacer {
+  height: 88px;
+  border-top: 1px solid var(--border);
+  @media (max-width: 1024px) {
+    height: 48px;
+  }
+}
+
+.ticks {
+  position: relative;
+  width: 100%;
+
+  &::before,
+  &::after {
+    content: '';
+    position: absolute;
+    top: -4.5px;
+    border: 5px solid transparent;
+  }
+
+  &::before {
+    left: 0;
+    border-left-color: var(--border);
+  }
+  &::after {
+    right: 0;
+    border-right-color: var(--border);
+  }
+}
+</file>
+
+<file path="frontend/src/App.jsx">
+import { useEffect, useState } from 'react'
+import EquityChart from './components/EquityChart'
+import BrainView from './components/BrainView'
+import RiskPanel from './components/RiskPanel'
+import LiveTrades from './components/LiveTrades'
+import ControlPad from './components/ControlPad'
+import TerminalLog from './components/TerminalLog'
+
+function App() {
+  const [signals, setSignals] = useState([])
+  const [logs, setLogs] = useState([])
+  
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsUrl = `${protocol}//${window.location.host}/ws/stream`
+    
+    let ws;
+    const connect = () => {
+      ws = new WebSocket(wsUrl)
+      
+      ws.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data)
+          if (payload.type === 'BRAIN_TICK') {
+            setSignals(payload.data)
+          } else if (payload.type === 'LOG') {
+              setLogs(prev => [...prev.slice(-300), payload.message])
+          }
+        } catch (e) {
+          console.error("WS Parse error", e)
+        }
+      }
+      ws.onclose = () => setTimeout(connect, 3000);
+    }
+    connect();
+
+    return () => { if(ws) ws.close() }
+  }, [])
+
+  return (
+    <div className="min-h-screen bg-bbg-bg text-gray-300 grid grid-cols-12 grid-rows-6 gap-2 p-2 h-screen">
+      
+      {/* Top Left: Chart (Col 1-8, Row 1-4) */}
+      <div className="col-span-9 row-span-4 border border-bbg-border bg-bbg-panel overflow-hidden flex flex-col">
+        <div className="border-b border-bbg-border p-2 text-bbg-cyan font-bold bg-black tracking-widest text-sm">
+          [ PORTFOLIO EQUITY ]
+        </div>
+        <div className="flex-grow relative bg-[#0a0a0a]">
+          <EquityChart />
+        </div>
+      </div>
+
+      {/* Top Right: Risk & Controls (Col 9-12, Row 1-4) */}
+      <div className="col-span-3 row-span-4 flex flex-col gap-2">
+        <RiskPanel />
+        <ControlPad />
+        <LiveTrades />
+      </div>
+
+      {/* Bottom Left: Terminal (Col 1-8, Row 5-6) */}
+      <div className="col-span-8 row-span-2 border border-bbg-border bg-bbg-panel flex flex-col overflow-hidden">
+        <div className="border-b border-bbg-border p-2 text-bbg-cyan font-bold bg-black tracking-widest text-sm">
+          [ SYSTEM TERMINAL ]
+        </div>
+        <TerminalLog logs={logs} />
+      </div>
+
+      {/* Bottom Right: Brain View (Col 9-12, Row 5-6) */}
+      <div className="col-span-4 row-span-2 border border-bbg-border bg-bbg-panel flex flex-col overflow-hidden">
+        <div className="border-b border-bbg-border p-2 text-bbg-cyan font-bold bg-black flex justify-between tracking-widest text-sm">
+          <span>[ BRAIN MATRIX ]</span>
+          <span className="text-bbg-green animate-pulse">● LIVE</span>
+        </div>
+        <BrainView signals={signals} />
+      </div>
+
+    </div>
+  )
+}
+
+export default App
+</file>
+
+<file path="frontend/src/assets/react.svg">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" aria-hidden="true" role="img" class="iconify iconify--logos" width="35.93" height="32" preserveAspectRatio="xMidYMid meet" viewBox="0 0 256 228"><path fill="#00D8FF" d="M210.483 73.824a171.49 171.49 0 0 0-8.24-2.597c.465-1.9.893-3.777 1.273-5.621c6.238-30.281 2.16-54.676-11.769-62.708c-13.355-7.7-35.196.329-57.254 19.526a171.23 171.23 0 0 0-6.375 5.848a155.866 155.866 0 0 0-4.241-3.917C100.759 3.829 77.587-4.822 63.673 3.233C50.33 10.957 46.379 33.89 51.995 62.588a170.974 170.974 0 0 0 1.892 8.48c-3.28.932-6.445 1.924-9.474 2.98C17.309 83.498 0 98.307 0 113.668c0 15.865 18.582 31.778 46.812 41.427a145.52 145.52 0 0 0 6.921 2.165a167.467 167.467 0 0 0-2.01 9.138c-5.354 28.2-1.173 50.591 12.134 58.266c13.744 7.926 36.812-.22 59.273-19.855a145.567 145.567 0 0 0 5.342-4.923a168.064 168.064 0 0 0 6.92 6.314c21.758 18.722 43.246 26.282 56.54 18.586c13.731-7.949 18.194-32.003 12.4-61.268a145.016 145.016 0 0 0-1.535-6.842c1.62-.48 3.21-.974 4.76-1.488c29.348-9.723 48.443-25.443 48.443-41.52c0-15.417-17.868-30.326-45.517-39.844Zm-6.365 70.984c-1.4.463-2.836.91-4.3 1.345c-3.24-10.257-7.612-21.163-12.963-32.432c5.106-11 9.31-21.767 12.459-31.957c2.619.758 5.16 1.557 7.61 2.4c23.69 8.156 38.14 20.213 38.14 29.504c0 9.896-15.606 22.743-40.946 31.14Zm-10.514 20.834c2.562 12.94 2.927 24.64 1.23 33.787c-1.524 8.219-4.59 13.698-8.382 15.893c-8.067 4.67-25.32-1.4-43.927-17.412a156.726 156.726 0 0 1-6.437-5.87c7.214-7.889 14.423-17.06 21.459-27.246c12.376-1.098 24.068-2.894 34.671-5.345a134.17 134.17 0 0 1 1.386 6.193ZM87.276 214.515c-7.882 2.783-14.16 2.863-17.955.675c-8.075-4.657-11.432-22.636-6.853-46.752a156.923 156.923 0 0 1 1.869-8.499c10.486 2.32 22.093 3.988 34.498 4.994c7.084 9.967 14.501 19.128 21.976 27.15a134.668 134.668 0 0 1-4.877 4.492c-9.933 8.682-19.886 14.842-28.658 17.94ZM50.35 144.747c-12.483-4.267-22.792-9.812-29.858-15.863c-6.35-5.437-9.555-10.836-9.555-15.216c0-9.322 13.897-21.212 37.076-29.293c2.813-.98 5.757-1.905 8.812-2.773c3.204 10.42 7.406 21.315 12.477 32.332c-5.137 11.18-9.399 22.249-12.634 32.792a134.718 134.718 0 0 1-6.318-1.979Zm12.378-84.26c-4.811-24.587-1.616-43.134 6.425-47.789c8.564-4.958 27.502 2.111 47.463 19.835a144.318 144.318 0 0 1 3.841 3.545c-7.438 7.987-14.787 17.08-21.808 26.988c-12.04 1.116-23.565 2.908-34.161 5.309a160.342 160.342 0 0 1-1.76-7.887Zm110.427 27.268a347.8 347.8 0 0 0-7.785-12.803c8.168 1.033 15.994 2.404 23.343 4.08c-2.206 7.072-4.956 14.465-8.193 22.045a381.151 381.151 0 0 0-7.365-13.322Zm-45.032-43.861c5.044 5.465 10.096 11.566 15.065 18.186a322.04 322.04 0 0 0-30.257-.006c4.974-6.559 10.069-12.652 15.192-18.18ZM82.802 87.83a323.167 323.167 0 0 0-7.227 13.238c-3.184-7.553-5.909-14.98-8.134-22.152c7.304-1.634 15.093-2.97 23.209-3.984a321.524 321.524 0 0 0-7.848 12.897Zm8.081 65.352c-8.385-.936-16.291-2.203-23.593-3.793c2.26-7.3 5.045-14.885 8.298-22.6a321.187 321.187 0 0 0 7.257 13.246c2.594 4.48 5.28 8.868 8.038 13.147Zm37.542 31.03c-5.184-5.592-10.354-11.779-15.403-18.433c4.902.192 9.899.29 14.978.29c5.218 0 10.376-.117 15.453-.343c-4.985 6.774-10.018 12.97-15.028 18.486Zm52.198-57.817c3.422 7.8 6.306 15.345 8.596 22.52c-7.422 1.694-15.436 3.058-23.88 4.071a382.417 382.417 0 0 0 7.859-13.026a347.403 347.403 0 0 0 7.425-13.565Zm-16.898 8.101a358.557 358.557 0 0 1-12.281 19.815a329.4 329.4 0 0 1-23.444.823c-7.967 0-15.716-.248-23.178-.732a310.202 310.202 0 0 1-12.513-19.846h.001a307.41 307.41 0 0 1-10.923-20.627a310.278 310.278 0 0 1 10.89-20.637l-.001.001a307.318 307.318 0 0 1 12.413-19.761c7.613-.576 15.42-.876 23.31-.876H128c7.926 0 15.743.303 23.354.883a329.357 329.357 0 0 1 12.335 19.695a358.489 358.489 0 0 1 11.036 20.54a329.472 329.472 0 0 1-11 20.722Zm22.56-122.124c8.572 4.944 11.906 24.881 6.52 51.026c-.344 1.668-.73 3.367-1.15 5.09c-10.622-2.452-22.155-4.275-34.23-5.408c-7.034-10.017-14.323-19.124-21.64-27.008a160.789 160.789 0 0 1 5.888-5.4c18.9-16.447 36.564-22.941 44.612-18.3ZM128 90.808c12.625 0 22.86 10.235 22.86 22.86s-10.235 22.86-22.86 22.86s-22.86-10.235-22.86-22.86s10.235-22.86 22.86-22.86Z"></path></svg>
+</file>
+
+<file path="frontend/src/assets/vite.svg">
+<svg xmlns="http://www.w3.org/2000/svg" width="77" height="47" fill="none" aria-labelledby="vite-logo-title" viewBox="0 0 77 47"><title id="vite-logo-title">Vite</title><style>.parenthesis{fill:#000}@media (prefers-color-scheme:dark){.parenthesis{fill:#fff}}</style><path fill="#9135ff" d="M40.151 45.71c-.663.844-2.02.374-2.02-.699V34.708a2.26 2.26 0 0 0-2.262-2.262H24.493c-.92 0-1.457-1.04-.92-1.788l7.479-10.471c1.07-1.498 0-3.578-1.842-3.578H15.443c-.92 0-1.456-1.04-.92-1.788l9.696-13.576c.213-.297.556-.474.92-.474h28.894c.92 0 1.456 1.04.92 1.788l-7.48 10.472c-1.07 1.497 0 3.578 1.842 3.578h11.376c.944 0 1.474 1.087.89 1.83L40.153 45.712z"/><mask id="a" width="48" height="47" x="14" y="0" maskUnits="userSpaceOnUse" style="mask-type:alpha"><path fill="#000" d="M40.047 45.71c-.663.843-2.02.374-2.02-.699V34.708a2.26 2.26 0 0 0-2.262-2.262H24.389c-.92 0-1.457-1.04-.92-1.788l7.479-10.472c1.07-1.497 0-3.578-1.842-3.578H15.34c-.92 0-1.456-1.04-.92-1.788l9.696-13.575c.213-.297.556-.474.92-.474H53.93c.92 0 1.456 1.04.92 1.788L47.37 13.03c-1.07 1.498 0 3.578 1.842 3.578h11.376c.944 0 1.474 1.088.89 1.831L40.049 45.712z"/></mask><g mask="url(#a)"><g filter="url(#b)"><ellipse cx="5.508" cy="14.704" fill="#eee6ff" rx="5.508" ry="14.704" transform="rotate(269.814 20.96 11.29)scale(-1 1)"/></g><g filter="url(#c)"><ellipse cx="10.399" cy="29.851" fill="#eee6ff" rx="10.399" ry="29.851" transform="rotate(89.814 -16.902 -8.275)scale(1 -1)"/></g><g filter="url(#d)"><ellipse cx="5.508" cy="30.487" fill="#8900ff" rx="5.508" ry="30.487" transform="rotate(89.814 -19.197 -7.127)scale(1 -1)"/></g><g filter="url(#e)"><ellipse cx="5.508" cy="30.599" fill="#8900ff" rx="5.508" ry="30.599" transform="rotate(89.814 -25.928 4.177)scale(1 -1)"/></g><g filter="url(#f)"><ellipse cx="5.508" cy="30.599" fill="#8900ff" rx="5.508" ry="30.599" transform="rotate(89.814 -25.738 5.52)scale(1 -1)"/></g><g filter="url(#g)"><ellipse cx="14.072" cy="22.078" fill="#eee6ff" rx="14.072" ry="22.078" transform="rotate(93.35 31.245 55.578)scale(-1 1)"/></g><g filter="url(#h)"><ellipse cx="3.47" cy="21.501" fill="#8900ff" rx="3.47" ry="21.501" transform="rotate(89.009 35.419 55.202)scale(-1 1)"/></g><g filter="url(#i)"><ellipse cx="3.47" cy="21.501" fill="#8900ff" rx="3.47" ry="21.501" transform="rotate(89.009 35.419 55.202)scale(-1 1)"/></g><g filter="url(#j)"><ellipse cx="14.592" cy="9.743" fill="#8900ff" rx="4.407" ry="29.108" transform="rotate(39.51 14.592 9.743)"/></g><g filter="url(#k)"><ellipse cx="61.728" cy="-5.321" fill="#8900ff" rx="4.407" ry="29.108" transform="rotate(37.892 61.728 -5.32)"/></g><g filter="url(#l)"><ellipse cx="55.618" cy="7.104" fill="#00c2ff" rx="5.971" ry="9.665" transform="rotate(37.892 55.618 7.104)"/></g><g filter="url(#m)"><ellipse cx="12.326" cy="39.103" fill="#8900ff" rx="4.407" ry="29.108" transform="rotate(37.892 12.326 39.103)"/></g><g filter="url(#n)"><ellipse cx="12.326" cy="39.103" fill="#8900ff" rx="4.407" ry="29.108" transform="rotate(37.892 12.326 39.103)"/></g><g filter="url(#o)"><ellipse cx="49.857" cy="30.678" fill="#8900ff" rx="4.407" ry="29.108" transform="rotate(37.892 49.857 30.678)"/></g><g filter="url(#p)"><ellipse cx="52.623" cy="33.171" fill="#00c2ff" rx="5.971" ry="15.297" transform="rotate(37.892 52.623 33.17)"/></g></g><path d="M6.919 0c-9.198 13.166-9.252 33.575 0 46.789h6.215c-9.25-13.214-9.196-33.623 0-46.789zm62.424 0h-6.215c9.198 13.166 9.252 33.575 0 46.789h6.215c9.25-13.214 9.196-33.623 0-46.789" class="parenthesis"/><defs><filter id="b" width="60.045" height="41.654" x="-5.564" y="16.92" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="7.659"/></filter><filter id="c" width="90.34" height="51.437" x="-40.407" y="-6.762" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="7.659"/></filter><filter id="d" width="79.355" height="29.4" x="-35.435" y="2.801" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="e" width="79.579" height="29.4" x="-30.84" y="20.8" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="f" width="79.579" height="29.4" x="-29.307" y="21.949" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="g" width="74.749" height="58.852" x="29.961" y="-17.13" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="7.659"/></filter><filter id="h" width="61.377" height="25.362" x="37.754" y="3.055" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="i" width="61.377" height="25.362" x="37.754" y="3.055" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="j" width="56.045" height="63.649" x="-13.43" y="-22.082" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="k" width="54.814" height="64.646" x="34.321" y="-37.644" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="l" width="33.541" height="35.313" x="38.847" y="-10.552" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="m" width="54.814" height="64.646" x="-15.081" y="6.78" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="n" width="54.814" height="64.646" x="-15.081" y="6.78" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="o" width="54.814" height="64.646" x="22.45" y="-1.645" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter><filter id="p" width="39.409" height="43.623" x="32.919" y="11.36" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17286" stdDeviation="4.596"/></filter></defs></svg>
+</file>
+
+<file path="frontend/src/components/BrainView.jsx">
+export default function BrainView({ signals }) {
+  return (
+    <div className="flex-grow overflow-y-auto w-full bg-[#050505]">
+      <table className="w-full text-left text-xs border-collapse">
+        <thead className="sticky top-0 bg-[#0a0a0a] text-bbg-cyan uppercase border-b border-bbg-border">
+          <tr>
+            <th className="p-2 font-normal">SYM</th>
+            <th className="p-2 font-normal">REG</th>
+            <th className="p-2 text-right font-normal">HRST</th>
+            <th className="p-2 text-right font-normal">Z-SCR</th>
+            <th className="p-2 text-right font-normal">CNF</th>
+          </tr>
+        </thead>
+        <tbody>
+          {signals.map((s, i) => (
+            <tr key={i} className="border-b border-[#1a1a1a] hover:bg-[#111]">
+              <td className="p-2 font-bold tracking-widest">{s.symbol}</td>
+              <td className={`p-2 ${s.regime === 'TRENDING' ? 'text-bbg-cyan' : s.regime === 'VOLATILE' ? 'text-bbg-red' : 'text-yellow-500'}`}>{s.regime}</td>
+              <td className={`p-2 text-right ${s.hurst > 0.65 ? 'text-bbg-green' : s.hurst < 0.40 ? 'text-bbg-red' : 'text-gray-400'}`}>
+                {s.hurst?.toFixed(2)}
+              </td>
+              <td className="p-2 text-right">{s.z_score?.toFixed(2)}</td>
+              <td className="p-2 text-right text-gray-500">{(s.confidence * 100).toFixed(0)}%</td>
+            </tr>
+          ))}
+          {signals.length === 0 && (
+            <tr><td colSpan="5" className="p-4 text-center text-gray-600">AWAITING BRAIN TELEMETRY...</td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+</file>
+
+<file path="frontend/src/components/ControlPad.jsx">
+import { useState } from 'react'
+
+export default function ControlPad() {
+  const [override, setOverride] = useState(false)
+  const [ghost, setGhost] = useState(false)
+  const [risk, setRisk] = useState(1.0)
+  const [killed, setKilled] = useState(false)
+
+  const syncState = async (m_over, m_ghost, m_risk) => {
+    try {
+      await fetch('/api/control/override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ manual_override: m_over, ghost_mode: m_ghost, max_risk_pct: m_risk })
+      })
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  const handleKill = async () => {
+    try {
+      await fetch('/api/control/kill', { method: 'POST' })
+      setKilled(true)
+    } catch (e) {}
+  }
+
+  return (
+    <div className="border border-bbg-border bg-bbg-panel p-3">
+      <div className="text-bbg-cyan font-bold tracking-widest text-sm mb-4">[ TACTICAL CONTROLS ]</div>
+      
+      <div className="space-y-5">
+        {/* Kill Switch */}
+        <button 
+          onClick={handleKill}
+          disabled={killed}
+          className={`w-full py-3 text-center font-bold tracking-widest text-black uppercase transition-colors ${killed ? 'bg-[#330000] text-red-900 border border-red-900' : 'bg-bbg-red hover:bg-red-600 shadow-[0_0_15px_rgba(255,0,0,0.4)]'}`}
+        >
+          {killed ? 'SYSTEM KILLED' : 'EMERGENCY STOP'}
+        </button>
+
+        {/* Toggles */}
+        <div className="flex justify-between items-center bg-[#0a0a0a] p-2 border border-[#1a1a1a]">
+          <span className="text-xs text-gray-400 font-bold">COMMANDER OVERRIDE</span>
+          <label className="relative inline-flex items-center cursor-pointer">
+            <input type="checkbox" className="sr-only peer" checked={override} onChange={(e) => {
+              setOverride(e.target.checked); syncState(e.target.checked, ghost, risk);
+            }} />
+            <div className="w-9 h-5 bg-[#1a1a1a] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-bbg-green peer-checked:after:bg-black"></div>
+          </label>
+        </div>
+
+        <div className="flex justify-between items-center bg-[#0a0a0a] p-2 border border-[#1a1a1a]">
+          <span className="text-xs text-gray-400 font-bold">GHOST MODE</span>
+          <label className="relative inline-flex items-center cursor-pointer">
+            <input type="checkbox" className="sr-only peer" checked={ghost} onChange={(e) => {
+              setGhost(e.target.checked); syncState(override, e.target.checked, risk);
+            }} />
+            <div className="w-9 h-5 bg-[#1a1a1a] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-gray-400 after:border-gray-500 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-600 peer-checked:after:bg-black"></div>
+          </label>
+        </div>
+
+        {/* Slider */}
+        <div className="pt-2">
+          <div className="text-xs text-gray-400 mb-2 flex justify-between font-bold">
+            <span>KELLY SOFT LIMIT (%)</span>
+            <span className="text-bbg-cyan">{risk.toFixed(1)}%</span>
+          </div>
+          <input 
+            type="range" min="0.1" max="5.0" step="0.1" 
+            value={risk} 
+            onChange={(e) => setRisk(parseFloat(e.target.value))}
+            onMouseUp={() => syncState(override, ghost, risk)}
+            className="w-full h-1 bg-[#1a1a1a] rounded-lg appearance-none cursor-pointer" 
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+</file>
+
+<file path="frontend/src/components/EquityChart.jsx">
+import { useEffect, useRef } from 'react'
+import { createChart } from 'lightweight-charts'
+
+export default function EquityChart() {
+  const chartContainerRef = useRef()
+  const chartRef = useRef()
+  const seriesRef = useRef()
+
+  useEffect(() => {
+    // 1. Initialize Chart
+    const chart = createChart(chartContainerRef.current, {
+      layout: {
+        background: { color: 'transparent' },
+        textColor: '#c5c6c7',
+      },
+      grid: {
+        vertLines: { color: '#1a1a1a' },
+        horzLines: { color: '#1a1a1a' },
+      },
+      rightPriceScale: {
+        borderColor: '#1a1a1a',
+      },
+      timeScale: {
+        borderColor: '#1a1a1a',
+        timeVisible: true,
+      },
+      crosshair: {
+        vertLine: { color: '#333', style: 0 },
+        horzLine: { color: '#333', style: 0 }
+      }
+    })
+    chartRef.current = chart
+
+    // 2. Add Area Series
+    const areaSeries = chart.addAreaSeries({
+      lineColor: '#00e676',
+      topColor: 'rgba(0, 230, 118, 0.4)',
+      bottomColor: 'rgba(0, 230, 118, 0.0)',
+      lineWidth: 2,
+    })
+    seriesRef.current = areaSeries
+
+    // Handle resize
+    const handleResize = () => {
+      if (chartRef.current && chartContainerRef.current) {
+        chartRef.current.applyOptions({
+          width: chartContainerRef.current.clientWidth,
+          height: chartContainerRef.current.clientHeight
+        })
+      }
+    }
+    window.addEventListener('resize', handleResize)
+    setTimeout(handleResize, 100) // Initial sizing
+
+    // Fetch Initial Data
+    const updateData = async () => {
+      try {
+        const res = await fetch('/api/equity')
+        const data = await res.json()
+        if (data && data.length > 0) {
+          areaSeries.setData(data)
+          chart.timeScale().fitContent()
+        }
+      } catch (err) {
+        console.error("Equity fetch error", err)
+      }
+    }
+
+    updateData()
+    const interval = setInterval(updateData, 5000)
+
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      clearInterval(interval)
+      chart.remove()
+    }
+  }, [])
+
+  return (
+    <div ref={chartContainerRef} className="absolute inset-0" />
+  )
+}
+</file>
+
+<file path="frontend/src/components/LiveTrades.jsx">
+import { useEffect, useState } from 'react'
+
+export default function LiveTrades() {
+  const [trades, setTrades] = useState([])
+
+  useEffect(() => {
+    const update = async () => {
+      try {
+        const res = await fetch('/api/positions')
+        setTrades(await res.json())
+      } catch (e) {}
+    }
+    update()
+    const int = setInterval(update, 3000)
+    return () => clearInterval(int)
+  }, [])
+
+  return (
+    <div className="border border-bbg-border bg-bbg-panel flex-grow flex flex-col overflow-hidden">
+      <div className="text-bbg-cyan font-bold tracking-widest text-sm p-3 border-b border-bbg-border bg-black">[ ACTIVE POSITIONS ]</div>
+      <div className="overflow-y-auto flex-grow p-2">
+        {trades.map((t, i) => (
+          <div key={i} className="flex justify-between items-center bg-[#0a0a0a] border border-[#1a1a1a] p-2 mb-2 text-xs">
+            <div>
+              <div className="font-bold text-sm tracking-widest">{t.ticker}</div>
+              <div className="text-gray-600">#{t.ticket}</div>
+            </div>
+            <div className="text-right">
+              <div className={`font-bold ${t.side === 'BUY' ? 'text-bbg-green' : 'text-bbg-red'}`}>
+                {t.side} {t.lot}
+              </div>
+              <div className="text-gray-400">@ {t.entry_price}</div>
+            </div>
+          </div>
+        ))}
+        {trades.length === 0 && <div className="text-gray-600 text-xs text-center mt-4">NO ACTIVE DEALS</div>}
+      </div>
+    </div>
+  )
+}
+</file>
+
+<file path="frontend/src/components/RiskPanel.jsx">
+import { useEffect, useState } from 'react'
+
+export default function RiskPanel() {
+  const [data, setData] = useState({ drawdown_pct: 0, total_exposure: 0, correlation_penalty: 0 })
+
+  useEffect(() => {
+    const update = async () => {
+      try {
+        const res = await fetch('/api/risk')
+        setData(await res.json())
+      } catch (e) {}
+    }
+    update()
+    const int = setInterval(update, 5000)
+    return () => clearInterval(int)
+  }, [])
+
+  return (
+    <div className="border border-bbg-border bg-bbg-panel p-3">
+      <div className="text-bbg-cyan font-bold tracking-widest text-sm mb-3">[ RISK METRICS ]</div>
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <div className="text-xs text-gray-500 mb-1">TOTAL EXPOSURE</div>
+          <div className="text-xl font-bold">{data.total_exposure.toFixed(2)} L</div>
+        </div>
+        <div>
+          <div className="text-xs text-gray-500 mb-1">CURRENT DRAWDOWN</div>
+          <div className={`text-xl font-bold ${data.drawdown_pct > 1.5 ? 'text-bbg-red' : 'text-gray-300'}`}>
+            {data.drawdown_pct.toFixed(2)}%
+          </div>
+        </div>
+      </div>
+      <div className="mt-4">
+        <div className="text-xs text-gray-500 mb-1 flex justify-between">
+          <span>COVARIANCE OVERLAY PENALTY</span>
+          <span className="text-bbg-red font-bold">{(data.correlation_penalty * 100).toFixed(0)}%</span>
+        </div>
+        <div className="w-full bg-[#1a1a1a] h-2">
+          <div className="bg-bbg-red h-full transition-all duration-500" style={{width: `${data.correlation_penalty * 100}%`}}></div>
+        </div>
+      </div>
+    </div>
+  )
+}
+</file>
+
+<file path="frontend/src/components/TerminalLog.jsx">
+import { useEffect, useRef } from 'react'
+
+export default function TerminalLog({ logs }) {
+  const endRef = useRef(null)
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [logs])
+
+  const getColor = (line) => {
+    if (line.includes("ERROR") || line.includes("CRITICAL")) return "text-bbg-red"
+    if (line.includes("WARN")) return "text-yellow-500"
+    if (line.includes("ORDER") || line.includes("DEAL") || line.includes("Iceberg")) return "text-bbg-green font-bold"
+    if (line.includes("choked") || line.includes("skipped")) return "text-bbg-red"
+    return "text-[#8ab4f8]"
+  }
+
+  return (
+    <div className="flex-grow p-2 overflow-y-auto text-xs font-mono bg-black">
+      {logs.length === 0 && <span className="text-gray-600">Awaiting telemetry...</span>}
+      {logs.map((log, i) => (
+        <div key={i} className={`whitespace-pre-wrap break-all ${getColor(log)} mb-1`}>
+          {log}
+        </div>
+      ))}
+      <div ref={endRef} />
+    </div>
+  )
+}
+</file>
+
+<file path="frontend/src/index.css">
+@import "tailwindcss";
+
+@theme {
+  --color-bbg-bg: #000000;
+  --color-bbg-panel: #0a0a0a;
+  --color-bbg-border: #1a1a1a;
+  --color-bbg-green: #00ff00;
+  --color-bbg-red: #ff0000;
+  --color-bbg-cyan: #00ffff;
+  --font-mono: 'Courier New', Courier, monospace;
+}
+
+body {
+  background-color: var(--color-bbg-bg);
+  color: #d1d5db;
+  font-family: var(--font-mono);
+  height: 100vh;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #000000;
+}
+::-webkit-scrollbar-thumb {
+  background: #1a1a1a;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #333333;
+}
+</file>
+
+<file path="frontend/src/main.jsx">
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import './index.css'
+import App from './App.jsx'
+
+createRoot(document.getElementById('root')).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)
+</file>
+
+<file path="frontend/tailwind.config.js">
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
+  theme: {
+    extend: {
+      colors: {
+        'bbg-bg': '#000000',
+        'bbg-panel': '#0a0a0a',
+        'bbg-border': '#1a1a1a',
+        'bbg-green': '#00ff00',
+        'bbg-red': '#ff0000',
+        'bbg-cyan': '#00ffff'
+      },
+      fontFamily: {
+        mono: ['"Courier New"', 'Courier', 'monospace'],
+      }
+    },
+  },
+  plugins: [],
+}
+</file>
+
+<file path="frontend/vite.config.js">
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+// https://vitejs.dev/config/
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+  server: {
+    proxy: {
+      '/api': 'http://127.0.0.1:8000',
+      '/ws': {
+        target: 'ws://127.0.0.1:8000',
+        ws: true
+      }
+    }
+  }
+})
+</file>
+
+<file path="launch_dashboard.py">
+import subprocess
+import os
+import sys
+import time
+
+def main():
+    print("========================================")
+    print(" Ω OMEGA COMMAND CENTER INITIALIZATION")
+    print("========================================")
+    
+    # 1. Start the FastAPI Database backend
+    print("[INFO] Booting FastAPI Backend Telemetry (Port 8000)...")
+    backend_env = os.environ.copy()
+    
+    # Determine the correct python executable depending on virtual environment
+    python_exe = sys.executable
+    if os.path.exists(os.path.join("venv", "Scripts", "python.exe")):
+        python_exe = os.path.join("venv", "Scripts", "python.exe")
+        
+    backend_process = subprocess.Popen(
+        [python_exe, "-m", "uvicorn", "dashboard:app", "--port", "8000"],
+        cwd=os.getcwd()
+    )
+    
+    # Allow 1 second for the server to bind before hitting the Vite dev server
+    time.sleep(1)
+
+    # 2. Start the Vite React Frontend
+    print("[INFO] Booting Vite Frontend Engine...")
+    frontend_dir = os.path.join(os.getcwd(), "frontend")
+    npm_cmd = "npm.cmd" if os.name == "nt" else "npm"
+    
+    frontend_process = subprocess.Popen(
+        [npm_cmd, "run", "dev"],
+        cwd=frontend_dir
+    )
+    
+    print("\n-------------------------------------------")
+    print(">>> BOTH ENGINES ARE ONLINE IN ONE TERMINAL")
+    print(">>> Press [CTRL+C] once to cleanly shutdown both servers.")
+    print("-------------------------------------------\n")
+
+    try:
+        # Wait indefinitely 
+        backend_process.wait()
+        frontend_process.wait()
+    except KeyboardInterrupt:
+        print("\n[INFO] Interrupt Signal Received. Shutting down servers gracefully...")
+        
+        # Kill both child processes on termination
+        backend_process.terminate()
+        frontend_process.terminate()
+        
+        backend_process.wait()
+        frontend_process.wait()
+        print("[INFO] Omega Command Center is offline. Goodbye.")
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path=".gitignore">
+# Virtual Environments
+venv/
+env/
+__pycache__/
+*.pyc
+
+# IDEs
+.vscode/
+
+# Logs and Databases
+logs/
+*.log
+*.db
+*.sqlite3
+optimized_params.db
+
+# Environment variables
+.env
+.envmmmm
+
+# Scratch & Temporary
+scratch/
+simulator/
+diagnostic.html
+index.html
+</file>
+
+<file path="backtest/__init__.py">
+# Initialize module
+</file>
+
+<file path="backtest/engine.py">
+import pandas as pd
+import numpy as np
+
+def run_backtest(df, strategy, initial_capital=10000, commission=0.001):
+    """
+    Runs a vectorised backtest for a given strategy.
+    
+    Args:
+        df (pd.DataFrame): DataFrame containing OHLCV data.
+        strategy (object): Strategy instance with a generate_signals(df) method.
+        initial_capital (float): Starting account balance.
+        commission (float): Commission per trade (e.g., 0.001 for 0.1%).
+        
+    Returns:
+        pd.DataFrame: Updated DataFrame with backtest results.
+    """
+    # 1. Generate signals using the strategy instance
+    df = strategy.generate_signals(df)
+    
+    # Identify the correct close column (to handle both MT5's 'close' or standard 'Close')
+    close_col = 'close' if 'close' in df.columns else 'Close'
+    
+    # 2. Calculate the daily percentage returns of the close prices
+    df['Returns'] = df[close_col].pct_change()
+    
+    # 3. Calculate 'Strategy_Returns' by shifting the 'Signal' column by 1
+    # We shift by 1 to prevent forward-looking bias (signals impact the next period's return)
+    # The signal value is either 1 (long) or -1 (short), or 0
+    df['Strategy_Returns'] = df['Signal'].shift(1) * df['Returns']
+    df['Strategy_Returns'] = df['Strategy_Returns'].fillna(0)
+    
+    # 4. Deduct the commission amount whenever the 'Position' column is not 0
+    trade_happened = df['Position'].fillna(0) != 0
+    df['Net_Returns'] = df['Strategy_Returns'] - np.where(trade_happened, commission, 0.0)
+    
+    # 5. Calculate an 'Equity' column showing the account balance over time
+    df['Equity'] = initial_capital * (1 + df['Net_Returns']).cumprod()
+    
+    return df
+</file>
+
+<file path="config.json">
+{
+    "manual_override": true,
+    "poll_interval": 10
+}
+</file>
+
+<file path="core/__init__.py">
+"""
+core/__init__.py  —  Omega Architecture package marker
+"""
+</file>
+
+<file path="core/data_feeder.py">
+"""
+core/data_feeder.py  —  Omega Architecture: Process 1 (Data Feeder)
+═══════════════════════════════════════════════════════════════════════
+Spawned as an independent OS process (bypasses GIL).
+
+Responsibilities:
+  - Calls mt5.initialize() independently (MT5 connections are NOT cross-process).
+  - Fetches live symbol ticks via mt5.symbol_info_tick() at maximum speed.
+  - Packs tick structs (bid, ask, last, volume_real, time, flags, spread) into a
+    multiprocessing.shared_memory block shared with the Alpha Engine.
+  - Uses a poison-pill sentinel (stop_event) for clean shutdown.
+
+Shared Memory Layout per symbol (8 × float64 = 64 bytes):
+  [0] bid
+  [1] ask
+  [2] last
+  [3] volume_real
+  [4] time (unix epoch float)
+  [5] flags
+  [6] spread (points)
+  [7] RESERVED (future use)
+"""
+
+import time
+import logging
+import multiprocessing as mp
+import numpy as np
+from multiprocessing.shared_memory import SharedMemory
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+FIELDS_PER_SYMBOL = 8          # float64 values stored per symbol
+BYTES_PER_SYMBOL  = FIELDS_PER_SYMBOL * 8   # 64 bytes each
+SHM_POLL_HZ       = 100        # tick polls per second (10 ms loop)
+MT5_INIT_RETRIES  = 3          # connection attempts before giving up
+MT5_INIT_BACKOFF  = 2.0        # seconds between retry attempts
+
+
+# ── Logger (subprocess-safe: no QueueHandler dependency) ──────────────────────
+def _make_logger() -> logging.Logger:
+    log = logging.getLogger("data_feeder")
+    if not log.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter(
+            "%(asctime)s [DataFeeder] %(levelname)s — %(message)s"
+        ))
+        log.addHandler(h)
+    log.setLevel(logging.INFO)
+    return log
+
+
+# ── MT5 connection helper with retry ──────────────────────────────────────────
+def _connect_mt5(login: int, password: str, server: str, logger: logging.Logger) -> bool:
+    """
+    Attempts mt5.initialize() up to MT5_INIT_RETRIES times with exponential
+    backoff. Returns True on success, False after all attempts exhausted.
+    Critical: must be called INSIDE the spawned process — MT5 connections are
+    not inheritable across process boundaries.
+    """
+    import MetaTrader5 as mt5
+    for attempt in range(1, MT5_INIT_RETRIES + 1):
+        logger.info(f"MT5 init attempt {attempt}/{MT5_INIT_RETRIES}…")
+        if mt5.initialize(login=int(login), password=password, server=server):
+            logger.info("MT5 connection established.")
+            return True
+        err = mt5.last_error()
+        logger.warning(f"mt5.initialize() failed: {err}")
+        if attempt < MT5_INIT_RETRIES:
+            time.sleep(MT5_INIT_BACKOFF * attempt)   # back-off: 2s, 4s
+    logger.critical(f"MT5 init FAILED after {MT5_INIT_RETRIES} attempts — process exiting.")
+    return False
+
+
+# ── Main process entry ────────────────────────────────────────────────────────
+def data_feeder_process(
+    symbols:      list,
+    shm_name:     str,
+    symbol_index: dict,
+    stop_event:   mp.Event,
+    mt5_login:    int,
+    mt5_password: str,
+    mt5_server:   str,
+    ready_event:  mp.Event,
+):
+    """
+    Entry point for the Data Feeder process.
+
+    Parameters
+    ----------
+    symbols       : list of symbol names to track
+    shm_name      : name of the already-created SharedMemory block
+    symbol_index  : {symbol: row_index} mapping into shm
+    stop_event    : mp.Event — set() to terminate the loop cleanly
+    mt5_login     : MT5 account number
+    mt5_password  : MT5 password string
+    mt5_server    : MT5 broker server string
+    ready_event   : mp.Event — set() once the first full snapshot is written
+    """
+    import MetaTrader5 as mt5
+
+    logger = _make_logger()
+    logger.info(f"DataFeeder PID={mp.current_process().pid} | tracking {len(symbols)} symbols")
+
+    # ── Independent MT5 initialisation (CRITICAL — per-process) ──────────────
+    if not _connect_mt5(mt5_login, mt5_password, mt5_server, logger):
+        return   # nothing to clean up yet
+
+    # ── Attach to the pre-allocated shared memory block ───────────────────────
+    try:
+        shm = SharedMemory(name=shm_name)
+    except FileNotFoundError:
+        logger.critical(f"SharedMemory '{shm_name}' not found — exiting.")
+        mt5.shutdown()
+        return
+
+    buf = np.ndarray(
+        shape=(len(symbols), FIELDS_PER_SYMBOL),
+        dtype=np.float64,
+        buffer=shm.buf,
+    )
+
+    logger.info("Shared memory attached. Entering tick loop.")
+    _ready_signalled = False
+    interval = 1.0 / SHM_POLL_HZ   # 10 ms target loop
+
+    while not stop_event.is_set():
+        t_start = time.perf_counter()
+
+        for sym in symbols:
+            idx = symbol_index[sym]
+            try:
+                tick = mt5.symbol_info_tick(sym)
+                if tick:
+                    buf[idx, 0] = tick.bid
+                    buf[idx, 1] = tick.ask
+                    buf[idx, 2] = tick.last
+                    buf[idx, 3] = tick.volume_real
+                    buf[idx, 4] = float(tick.time)
+                    buf[idx, 5] = float(tick.flags)
+                    info = mt5.symbol_info(sym)
+                    buf[idx, 6] = float(info.spread) if info else 0.0
+                    buf[idx, 7] = 0.0   # reserved
+            except Exception as exc:
+                logger.warning(f"Tick error [{sym}]: {exc}")
+
+        # Signal the AlphaEngine only after the first complete snapshot
+        if not _ready_signalled:
+            ready_event.set()
+            _ready_signalled = True
+            logger.info("First snapshot written — signalling AlphaEngine.")
+
+        elapsed   = time.perf_counter() - t_start
+        sleep_for = max(0.0, interval - elapsed)
+        time.sleep(sleep_for)
+
+    logger.info("Stop event received — releasing resources.")
+    shm.close()
+    mt5.shutdown()
+    logger.info("DataFeeder exited cleanly.")
+</file>
+
+<file path="dashboard.py">
+import asyncio
+import aiofiles
+import sqlite3
+import json
+import os
+import pandas as pd
+from fastapi import FastAPI, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+app = FastAPI(title="Omega Command Center")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+def query_db(query, params=()):
+    try:
+        conn = sqlite3.connect('file:logs/trades.db?mode=ro', uri=True)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(query, params)
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"DB Read Error: {e}")
+        return []
+
+@app.get("/api/equity")
+def get_equity():
+    rows = query_db("SELECT timestamp, pnl FROM trades WHERE pnl IS NOT NULL ORDER BY timestamp ASC")
+    current_equity = 100000.0
+    result = []
+    
+    if not rows:
+        import time
+        return [{"time": int(time.time()), "value": current_equity}]
+        
+    df = pd.DataFrame(rows)
+    df['time'] = df['timestamp'].astype(int)
+    grouped = df.groupby('time')['pnl'].sum().reset_index()
+    
+    for _, row in grouped.iterrows():
+        current_equity += row['pnl']
+        result.append({"time": int(row['time']), "value": round(current_equity, 2)})
+        
+    return result
+
+@app.get("/api/positions")
+def get_positions():
+    """Returns open deals directly from the SQLite engine"""
+    rows = query_db("SELECT symbol, direction, lot, price, ticket FROM trades WHERE pnl IS NULL ORDER BY timestamp DESC")
+    
+    positions = []
+    for r in rows:
+        dir_str = "BUY" if r['direction'] == 1.0 else "SELL"
+        positions.append({
+            "ticker": r['symbol'],
+            "side": dir_str,
+            "lot": r['lot'],
+            "entry_price": r['price'],
+            "ticket": r['ticket']
+        })
+        
+    # Mock fallback for UI testing if empty
+    if not positions:
+        return [
+            {"ticker": "EURUSD", "side": "SELL", "lot": 0.5, "entry_price": 1.16854, "ticket": 1001001},
+            {"ticker": "XAUUSD", "side": "BUY", "lot": 1.2, "entry_price": 1980.50, "ticket": 1001002}
+        ]
+        
+    return positions
+
+@app.get("/api/brain/signals")
+def get_signals():
+    """Queries the latest signal per symbol from the signals table."""
+    rows = query_db('''
+        SELECT symbol, regime, hurst, z_score, confidence 
+        FROM signals 
+        WHERE timestamp IN (SELECT max(timestamp) FROM signals GROUP BY symbol)
+    ''')
+    
+    if not rows:
+        return [
+            {"symbol": "EURUSD", "regime": "TRENDING", "hurst": 0.72, "z_score": 1.4, "confidence": 0.85},
+            {"symbol": "GBPUSD", "regime": "RANGING", "hurst": 0.41, "z_score": -0.2, "confidence": 0.45},
+            {"symbol": "XAGUSD", "regime": "TRENDING", "hurst": 0.81, "z_score": 2.1, "confidence": 0.95},
+            {"symbol": "USDJPY", "regime": "VOLATILE", "hurst": 0.65, "z_score": -1.8, "confidence": 0.75},
+        ]
+        
+    return rows
+
+@app.get("/api/risk")
+def get_risk():
+    """Calculates live risk metrics from the database."""
+    rows = query_db("SELECT pnl FROM trades WHERE pnl IS NOT NULL")
+    
+    drawdown = 0.0
+    if rows:
+        df = pd.DataFrame(rows)
+        eq = 100000.0 + df['pnl'].cumsum()
+        peak = eq.cummax()
+        if (peak > 0).all():
+            drawdown = ((peak - eq) / peak).max() * 100
+    
+    open_trades = query_db("SELECT sum(lot) as total_lot FROM trades WHERE pnl IS NULL")
+    exposure = open_trades[0]['total_lot'] if open_trades and open_trades[0]['total_lot'] else 1.7 # Mock UI
+    
+    state = query_db("SELECT value FROM control_state WHERE key='correlation_penalty'")
+    penalty = float(state[0]['value']) if state else 0.85 
+    
+    return {
+        "drawdown_pct": round(drawdown, 2),
+        "total_exposure": round(exposure, 2),
+        "correlation_penalty": penalty
+    }
+
+# Control Commands Pydantic Model
+class OverrideCommand(BaseModel):
+    manual_override: bool
+    ghost_mode: bool
+    max_risk_pct: float
+
+@app.post("/api/control/override")
+def control_override(cmd: OverrideCommand):
+    try:
+        conn = sqlite3.connect('logs/trades.db', timeout=5.0)
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS control_state (key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("REPLACE INTO control_state (key, value) VALUES (?, ?)", ("manual_override", str(cmd.manual_override)))
+        cur.execute("REPLACE INTO control_state (key, value) VALUES (?, ?)", ("ghost_mode", str(cmd.ghost_mode)))
+        cur.execute("REPLACE INTO control_state (key, value) VALUES (?, ?)", ("max_risk_pct", str(cmd.max_risk_pct)))
+        conn.commit()
+        conn.close()
+        return {"status": "SUCCESS"}
+    except Exception as e:
+        return {"status": "ERROR", "msg": str(e)}
+
+@app.post("/api/control/kill")
+def emergency_kill():
+    try:
+        conn = sqlite3.connect('logs/trades.db', timeout=5.0)
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS control_state (key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("REPLACE INTO control_state (key, value) VALUES (?, ?)", ("EMERGENCY_STOP", "True"))
+        conn.commit()
+        conn.close()
+        return {"status": "KILLED"}
+    except Exception as e:
+        return {"status": "ERROR"}
+
+# Multiplexed JSON WebSocket
+@app.websocket("/ws/stream")
+async def websocket_stream(websocket: WebSocket):
+    await websocket.accept()
+    log_path = "logs/trading.log"
+    
+    # 1. Log Tailing Task
+    async def tail_logs():
+        if not os.path.exists(log_path):
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            open(log_path, 'a').close()
+            
+        async with aiofiles.open(log_path, mode="r", encoding="utf-8", errors='replace') as f:
+            await f.seek(0, os.SEEK_END)
+            while True:
+                line = await f.readline()
+                if not line:
+                    await asyncio.sleep(0.1)
+                    continue
+                await websocket.send_text(json.dumps({
+                    "type": "LOG",
+                    "message": line.strip()
+                }))
+
+    # 2. Brain Polling Task
+    async def broadcast_brain():
+        while True:
+            await asyncio.sleep(2.0)
+            signals = get_signals()
+            await websocket.send_text(json.dumps({
+                "type": "BRAIN_TICK",
+                "data": signals
+            }))
+
+    try:
+        await asyncio.gather(tail_logs(), broadcast_brain())
+    except Exception as e:
+        print(f"WS Exception: {e}")
+</file>
+
+<file path="execution/__init__.py">
+# Initialize module
+</file>
+
+<file path="execution/mt5_client.py">
+import asyncio
+import MetaTrader5 as mt5
+import pandas as pd
+import time
+from utils.logger import setup_logger
+
+# Use professional logger exclusively configured within the utils path
+logger = setup_logger("mt5_client")
+
+def initialize_mt5(login=None, password=None, server=None):
+    """
+    Initializes the MetaTrader5 terminal. If credentials are provided, attempts login.
+    """
+    logger.info("Initializing MetaTrader5 connection...")
+    
+    # MT5 strictly requires integer login IDs natively
+    if login is not None:
+        try:
+            login = int(login)
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid login ID '{login}'. Resetting to generic launch.")
+            login = None
+
+    if login and password and server:
+        logger.info(f"Attempting to launch and log in to '{server}' account '{login}'...")
+        if not mt5.initialize(login=login, password=password, server=server):
+            logger.error(f"mt5.initialize(credentials) failed, error code: {mt5.last_error()}")
+            return False
+    else:
+        logger.info("Launching generic MT5 terminal (no remote credentials applied)...")
+        if not mt5.initialize():
+            logger.error(f"mt5.initialize() failed generically, error code: {mt5.last_error()}")
+            return False
+            
+    logger.info("MetaTrader5 initialized successfully.")
+    return True
+
+def fetch_rates(symbol, count, timeframe=mt5.TIMEFRAME_M5):
+    """
+    Fetches historical M5 data (or specified timeframe) for a given symbol.
+    Returns a localized pandas DataFrame with 'time' as the index.
+    """
+    logger.info(f"Fetching {count} rates for {symbol} at timeframe {timeframe}...")
+    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+    
+    if rates is None:
+        logger.error(f"Failed to fetch rates, error code: {mt5.last_error()}")
+        # Return an empty DataFrame with the expected index name
+        df = pd.DataFrame()
+        df.index.name = 'time'
+        return df
+        
+    # Convert to DataFrame
+    df = pd.DataFrame(rates)
+    
+    # Convert 'time' to datetime objects and set as index
+    df['time'] = pd.to_datetime(df['time'], unit='s')
+    
+    # "localized pandas DataFrame" - often means timezone awareness
+    # MT5 times are server-time, but let's localize if needed or leave as is.
+    # To be extremely safe, we assign the time column as the index.
+    df.set_index('time', inplace=True)
+    
+    logger.info(f"Successfully fetched {len(df)} records for {symbol}.")
+    return df
+
+def shutdown_mt5():
+    """
+    Shuts down the MetaTrader5 connection.
+    """
+    logger.info("Shutting down MetaTrader5...")
+    mt5.shutdown()
+    logger.info("MetaTrader5 shutdown complete.")
+
+def get_open_positions(symbol=None):
+    """
+    Directly queries the MT5 terminal to find active trades.
+    Bypassing local configurations ensures robust state logic.
+    """
+    if symbol:
+        positions = mt5.positions_get(symbol=symbol)
+    else:
+        positions = mt5.positions_get()
+        
+    if positions is None:
+        logger.error(f"Failed to fetch positions. Error code: {mt5.last_error()}")
+        return []
+        
+    # Return as list allowing immediate iterative access
+    return list(positions)
+
+def get_active_symbols():
+    """
+    Returns a list of all currently visible (Market Watch) symbols from the MT5 terminal
+    that the engine is equipped to trade. Supports Forex, Metals, Indices, and Synthetics.
+    """
+    symbols = mt5.symbols_get()
+    if symbols is None:
+        logger.error(f"Failed to fetch symbols. Error code: {mt5.last_error()}")
+        return []
+
+    # Fix #24: Expand beyond FOREX-only. The engine is tick_size-aware (Flaws 11/12)
+    # and can correctly handle Metals, Indices, and Synthetics.
+    # Include all visible symbols whose calc mode is one of the well-supported types.
+    SUPPORTED_CALC_MODES = {
+        mt5.SYMBOL_CALC_MODE_FOREX,          # Standard Forex pairs
+        mt5.SYMBOL_CALC_MODE_CFD,            # Indices, Metals (e.g., XAUUSD, US500)
+        mt5.SYMBOL_CALC_MODE_CFDINDEX,       # Index CFDs (some brokers)
+        mt5.SYMBOL_CALC_MODE_CFDLEVERAGE,    # Leveraged CFDs
+    }
+
+    active_symbols = [
+        s.name for s in symbols
+        if s.visible and s.trade_calc_mode in SUPPORTED_CALC_MODES
+    ]
+
+    logger.info(f"Dynamically discovered {len(active_symbols)} tradeable symbols (Forex + CFDs).")
+    return active_symbols
+
+def execute_order(symbol, order_type, volume, sl=None, tp=None):
+    """
+    Constructs the MT5 request dictionary and executes an order,
+    incorporating a retry mechanism for requotes and price changes.
+    """
+    # 0 implies a market execution deal
+    action = mt5.TRADE_ACTION_DEAL
+    
+    # Capture the latest live price context to format the order efficiently
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        logger.error(f"execute_order: symbol_info_tick({symbol}) returned None — aborting.")
+        return None
+
+    if order_type == mt5.ORDER_TYPE_BUY:
+        price = tick.ask
+    elif order_type == mt5.ORDER_TYPE_SELL:
+        price = tick.bid
+    else:
+        logger.error(f"Unsupported order_type natively passed: {order_type}")
+        return None
+        
+    # Instantiate universally standardized MT5 routing dictionary
+    request = {
+        "action": action,
+        "symbol": symbol,
+        "volume": float(volume),
+        "type": order_type,
+        "price": price,
+        "deviation": 20,
+        "magic": 100000,
+        "comment": "algorithmic_trade",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    
+    if sl is not None:
+        request["sl"] = float(sl)
+    if tp is not None:
+        request["tp"] = float(tp)
+        
+    max_retries = 3
+    for attempt in range(max_retries):
+        logger.info(f"Attempting order execution ({attempt+1}/{max_retries}) - Symbol: {symbol}, Type: {order_type}, Vol: {volume}")
+        
+        # Fire signal payload over the terminal bridge
+        result = mt5.order_send(request)
+        
+        if result is None:
+            logger.error(f"order_send failed unconditionally. Error: {mt5.last_error()}")
+            return None
+            
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(f"Order executed successfully! Deal ticket: {result.deal}, Retcode: {result.retcode}")
+            return result
+            
+        # Inspect for requotes / volatile price failures and initialize retry
+        if result.retcode in [mt5.TRADE_RETCODE_REQUOTE, mt5.TRADE_RETCODE_PRICE_CHANGED]:
+            logger.warning(f"Order failure. Retcode: {result.retcode}. Price volatility/requote triggered. Retrying after 1s...")
+            
+            # Re-poll live ticker pricing since market momentum skewed the previous target
+            if order_type == mt5.ORDER_TYPE_BUY:
+                request["price"] = mt5.symbol_info_tick(symbol).ask
+            elif order_type == mt5.ORDER_TYPE_SELL:
+                request["price"] = mt5.symbol_info_tick(symbol).bid
+                
+            time.sleep(1)
+            continue
+            
+        # Any disparate failure logs statically and fractures out
+        logger.error(f"Permanent order failure. Retcode: {result.retcode}, Comment: {result.comment}")
+        return result
+        
+    logger.error(f"Failed to execute order across {max_retries} loop spans due to rolling volatility constraint.")
+    return None
+
+async def get_order_book_micro_price(symbol: str) -> float:
+    """
+    Subscribes to Depth of Market, calculates the Volume-Weighted Micro-Price,
+    and immediately releases the book to conserve CPU and avoid throttling.
+    Formula: P_micro = ((P_ask * V_bid) + (P_bid * V_ask)) / (V_bid + V_ask)
+    Must be awaited — uses asyncio.sleep to yield the event loop during DOM population.
+    """
+    if not mt5.market_book_add(symbol):
+        logger.warning(f"Failed to subscribe to market book for {symbol}")
+        return 0.0
+        
+    try:
+        # Yield event loop while MT5 populates the book (non-blocking)
+        await asyncio.sleep(0.05)
+        book = mt5.market_book_get(symbol)
+        if not book:
+            return 0.0
+            
+        best_bid = 0.0
+        best_ask = float('inf')
+        vol_bid = 0.0
+        vol_ask = 0.0
+        
+        for item in book:
+            if item.type == mt5.BOOK_TYPE_SELL: # Ask
+                if item.price < best_ask:
+                    best_ask = item.price
+                vol_ask += item.volume
+            elif item.type == mt5.BOOK_TYPE_BUY: # Bid
+                if item.price > best_bid:
+                    best_bid = item.price
+                vol_bid += item.volume
+                
+        if vol_bid + vol_ask == 0.0 or best_bid == 0.0 or best_ask == float('inf'):
+            return 0.0
+            
+        p_micro = ((best_ask * vol_bid) + (best_bid * vol_ask)) / (vol_bid + vol_ask)
+        return p_micro
+        
+    finally:
+        mt5.market_book_release(symbol)
+</file>
+
+<file path="pyrightconfig.json">
+{
+  "venvPath": ".",
+  "venv": "venv",
+  "extraPaths": [
+    "venv/Lib/site-packages"
+  ]
+}
+</file>
+
+<file path="utils/__init__.py">
+# Utils module initialization
+</file>
+
+<file path="utils/config.py">
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from the .env file
+load_dotenv()
+
+# MetaTrader 5 Configuration
+# Fallback to 0 so import never crashes; initialize_mt5() will handle the empty-credentials path gracefully.
+MT5_ACCOUNT  = int(os.getenv("MT5_ACCOUNT", "0"))
+MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
+MT5_SERVER   = os.getenv("MT5_SERVER",   "")
+
+# Risk Configuration with reasonable defaults
+MAX_RISK_PER_TRADE = float(os.getenv("MAX_RISK_PER_TRADE", "0.005"))
+MAX_DAILY_LOSS     = float(os.getenv("MAX_DAILY_LOSS",     "0.05"))
+ACCOUNT_BALANCE    = float(os.getenv("ACCOUNT_BALANCE",    "10000.0"))
+
+# Target symbols to monitor if none are specified
+SYMBOLS = os.getenv("SYMBOLS", "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,USDCHF,NZDUSD").split(",")
+
+# Institutional / Multi-Agent Parameters
+ADX_THRESHOLD          = int(os.getenv("ADX_THRESHOLD",          "25"))
+MAX_SESSION_DRAWDOWN   = float(os.getenv("MAX_SESSION_DRAWDOWN", "0.015"))
+MAX_ALLOWED_SPREAD     = int(os.getenv("MAX_ALLOWED_SPREAD",     "20"))
+MAX_CONSECUTIVE_LOSSES = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "3"))
+</file>
+
+<file path="utils/logger.py">
+import logging
+import logging.handlers
+import queue
+import os
+
+# ── Global Logging Infrastructure ──────────────────────
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "trading.log")
+
+# Force explicit thread-safe Queue and Listener instance for the application
+log_queue = queue.Queue(-1)
+
+_formatter = logging.Formatter('%(asctime)s - %(module)s - %(levelname)s - %(message)s')
+
+# Rotating File Handler (Max 50MB -> 50 * 1024 * 1024, keeping 5 backups)
+_file_handler = logging.handlers.RotatingFileHandler(
+    log_file,
+    maxBytes=50 * 1024 * 1024, 
+    backupCount=5,
+    encoding='utf-8'
+)
+_file_handler.setFormatter(_formatter)
+
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_formatter)
+
+# Single Listener pushing logs synchronously out of the queue
+listener = logging.handlers.QueueListener(log_queue, _file_handler, _console_handler)
+listener.start()
+
+def setup_logger(name="trading"):
+    """
+    Sets up a thread-safe professional logger funneling into a central QueueListener.
+    """
+    logger = logging.getLogger(name)
+    
+    # Avoid attaching handlers repeatedly if initialized multiple times
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        
+        # We only attach the QueueHandler so multiple threads/processes don't fight over file rotation
+        queue_handler = logging.handlers.QueueHandler(log_queue)
+        logger.addHandler(queue_handler)
+
+    return logger
+
+# Generate a default project-level logger for broad imports
+logger = setup_logger("main")
+</file>
+
+<file path="core/alpha_engine.py">
+"""
+core/alpha_engine.py  —  Omega Architecture: Process 2 (Alpha Engine)
+═══════════════════════════════════════════════════════════════════════
+Spawned as an independent OS process (bypasses GIL).
+
+Responsibilities:
+  - Waits for DataFeeder's ready_event, then attaches to SharedMemory.
+  - Maintains per-symbol circular OHLCV buffers (pre-allocated np.zeros(200))
+    updated in-place via a rolling pointer — zero new MT5 candle fetches
+    during steady-state operation.
+  - Runs ALL mathematics as pure NumPy matrix operations:
+      Phase 2: Hurst Exponent (R/S), ATR (Wilder EWM), Z-Score
+      Phase 3: Order Flow Imbalance (tick-level bid/ask delta vectors)
+  - Publishes typed Signal namedtuples to a multiprocessing.Queue
+    consumed by the Execution Router.
+
+Fixes vs. previous version:
+  - lows[] buffer: initialised to np.zeros(); first-write guard prevents
+    stale 1e18 sentinel contaminating ATR on seeded symbols.
+  - CANDLE_SEED_MINIMUM guard: signals are not published until at least
+    CANDLE_SEED_MINIMUM bars of real data are in the buffer.
+  - MT5 init retry via _connect_mt5() (shared pattern with DataFeeder).
+"""
+
+import time
+import logging
+import multiprocessing as mp
+import numpy as np
+from collections import deque
+from multiprocessing.shared_memory import SharedMemory
+from typing import NamedTuple
+
+from core.data_feeder import FIELDS_PER_SYMBOL, BYTES_PER_SYMBOL
+
+# ── Signal wire type ─────────────────────────────────────────────────────────
+class Signal(NamedTuple):
+    symbol:    str
+    direction: float     # +1.0 = BUY, -1.0 = SELL, 0.0 = FLAT
+    atr:       float
+    hurst:     float
+    regime:    str       # "TRENDING" | "RANGING" | "NO_TRADE"
+    ofi_ok:    bool      # True = OFI clear, False = OFI vetoed
+    timestamp: float     # unix epoch
+
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+BUFFER_SIZE        = 200    # circular candle buffer (pre-allocated)
+CANDLE_SEED_MINIMUM = 30   # must have ≥ this many real bars before publishing
+HURST_LAGS         = 60    # max R/S lags for Hurst calculation
+ATR_PERIOD         = 14    # EWM alpha = 1/14
+ZSCORE_PERIOD      = 20    # rolling Z-Score window
+OFI_DEPTH          = 100   # tick-level deque maxlen
+CANDLE_SEC         = 300   # 5-minute candle duration in seconds
+EVAL_INTERVAL      = 5.0   # full signal evaluation every N seconds
+MT5_INIT_RETRIES   = 3
+MT5_INIT_BACKOFF   = 2.0
+
+
+# ── Logger ────────────────────────────────────────────────────────────────────
+def _make_logger() -> logging.Logger:
+    log = logging.getLogger("alpha_engine")
+    if not log.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter(
+            "%(asctime)s [AlphaEngine] %(levelname)s — %(message)s"
+        ))
+        log.addHandler(h)
+    log.setLevel(logging.INFO)
+    return log
+
+
+def _connect_mt5(login: int, password: str, server: str, logger: logging.Logger) -> bool:
+    import MetaTrader5 as mt5
+    for attempt in range(1, MT5_INIT_RETRIES + 1):
+        logger.info(f"MT5 init attempt {attempt}/{MT5_INIT_RETRIES}…")
+        if mt5.initialize(login=int(login), password=password, server=server):
+            logger.info("MT5 connection established.")
+            return True
+        logger.warning(f"mt5.initialize() failed: {mt5.last_error()}")
+        if attempt < MT5_INIT_RETRIES:
+            time.sleep(MT5_INIT_BACKOFF * attempt)
+    logger.critical(f"MT5 init FAILED after {MT5_INIT_RETRIES} attempts — process exiting.")
+    return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 2: VECTORIZED MATHEMATICS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _vectorized_atr(
+    highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = ATR_PERIOD
+) -> float:
+    """
+    Pure-NumPy Wilder ATR.  No Python loops over candles.
+    Returns the Wilder EWM ATR scalar for the full buffer.
+    """
+    if len(closes) < period + 1:
+        valid_range = highs - lows
+        return float(np.std(valid_range[valid_range > 0])) if np.any(valid_range > 0) else 0.0
+
+    prev_c = closes[:-1]
+    curr_h = highs[1:]
+    curr_l = lows[1:]
+
+    tr = np.maximum(
+        curr_h - curr_l,
+        np.maximum(
+            np.abs(curr_h - prev_c),
+            np.abs(curr_l - prev_c),
+        )
+    )
+
+    alpha   = 1.0 / period
+    weights = (1.0 - alpha) ** np.arange(len(tr) - 1, -1, -1, dtype=np.float64)
+    w_sum   = weights.sum()
+    return float(np.dot(weights, tr) / w_sum) if w_sum > 0 else 0.0
+
+
+def _vectorized_hurst(closes: np.ndarray, max_lags: int = HURST_LAGS) -> float:
+    """
+    Pure-NumPy Hurst Exponent via Rescaled Range (R/S) analysis.
+    All reshape / cumsum / std operations are NumPy matrix ops —
+    the outer Python loop is over ~58 lag values (trivial cost).
+    Returns H clamped to [0.0, 1.0].
+    """
+    if len(closes) < 4:
+        return 0.5
+
+    safe_closes = np.where(closes == 0, 1e-10, closes)
+    ts = np.log(safe_closes[1:] / safe_closes[:-1])
+    ts = ts[np.isfinite(ts)]
+    n  = len(ts)
+    if n < 4:
+        return 0.5
+
+    max_lag = min(max_lags, n // 2)
+    lags    = np.arange(2, max(3, max_lag), dtype=np.int32)
+
+    rs_vals  = []
+    lag_vals = []
+
+    for lag in lags:
+        m = n // lag
+        if m == 0:
+            continue
+        chunk = ts[:m * lag].reshape(m, lag)   # ← all inner math is matrix ops
+        means = chunk.mean(axis=1, keepdims=True)
+        dev   = chunk - means
+        cum   = dev.cumsum(axis=1)
+        r     = cum.max(axis=1) - cum.min(axis=1)
+        s     = chunk.std(axis=1)
+        s     = np.where(s == 0, 1e-10, s)
+        rs_vals.append(float(np.mean(r / s)))
+        lag_vals.append(int(lag))
+
+    if len(lag_vals) < 2:
+        return 0.5
+
+    log_lags = np.log(np.array(lag_vals, dtype=np.float64))
+    log_rs   = np.log(np.array(rs_vals,  dtype=np.float64))
+    valid    = np.isfinite(log_lags) & np.isfinite(log_rs)
+    if valid.sum() < 2:
+        return 0.5
+
+    poly = np.polyfit(log_lags[valid], log_rs[valid], 1)
+    return float(np.clip(poly[0], 0.0, 1.0))
+
+
+def _vectorized_zscore(series: np.ndarray, period: int = ZSCORE_PERIOD) -> float:
+    """Vectorised rolling Z-Score on the tail slice."""
+    if len(series) < period:
+        return 0.0
+    window = series[-period:]
+    mu, sigma = window.mean(), window.std()
+    if sigma < 1e-12:
+        return 0.0
+    return float((series[-1] - mu) / sigma)
+
+
+def _regime_from_hurst(h: float, hurst_threshold: float) -> str:
+    if h > hurst_threshold:
+        return "TRENDING"
+    elif h < (hurst_threshold - 0.10):
+        return "RANGING"
+    return "NO_TRADE"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 3: OFI (per-symbol tick deque)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _compute_ofi(tick_deque: deque, signal: float) -> bool:
+    """
+    Order Flow Imbalance gate — pure NumPy, no Python loops over ticks.
+    If a BUY signal faces dominant ask-side absorption (sell pressure > 65%) → VETO.
+    If a SELL signal faces dominant bid-side absorption (buy pressure > 65%) → VETO.
+    Returns True (CLEAR) or False (VETOED).
+    """
+    if len(tick_deque) < 10:
+        return True   # not enough microstructure data — let through
+
+    ticks = np.array(tick_deque, dtype=np.float64)   # shape (N, 3): bid, ask, vol
+    vols  = ticks[:, 2]
+
+    bid_delta = np.diff(ticks[:, 0], prepend=ticks[0, 0])
+    ask_delta = np.diff(ticks[:, 1], prepend=ticks[0, 1])
+
+    buyer_mask  = (bid_delta > 0) | (ask_delta < 0)
+    seller_mask = (bid_delta < 0) | (ask_delta > 0)
+
+    bid_vol = vols[buyer_mask].sum()
+    ask_vol = vols[seller_mask].sum()
+    total   = bid_vol + ask_vol
+
+    if total < 1e-10:
+        return True
+
+    buy_pressure  = bid_vol / total
+    sell_pressure = ask_vol / total
+
+    if signal == 1.0 and sell_pressure > 0.65:
+        return False   # sellers dominating micro-tape → VETO BUY
+    if signal == -1.0 and buy_pressure > 0.65:
+        return False   # buyers dominating micro-tape → VETO SELL
+    return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN PROCESS ENTRY
+# ══════════════════════════════════════════════════════════════════════════════
+
+def alpha_engine_process(
+    symbols:      list,
+    shm_name:     str,
+    symbol_index: dict,
+    signal_queue: mp.Queue,
+    stop_event:   mp.Event,
+    mt5_login:    int,
+    mt5_password: str,
+    mt5_server:   str,
+    feeder_ready: mp.Event,
+    live_params:  mp.Array,
+):
+    """
+    Alpha Engine entry point.
+
+    Reads live ticks from shared memory written by the Data Feeder.
+    Applies vectorised mathematics to pre-allocated circular OHLCV buffers.
+    Publishes Signal namedtuples to signal_queue for the Execution Router.
+    """
+    import MetaTrader5 as mt5
+
+    logger = _make_logger()
+    logger.info(f"AlphaEngine PID={mp.current_process().pid} | {len(symbols)} symbols")
+
+    # ── Independent MT5 init (needed for initial candle seed + HTF data) ──────
+    if not _connect_mt5(mt5_login, mt5_password, mt5_server, logger):
+        return
+    logger.info("MT5 connection established.")
+
+    # ── Wait for DataFeeder's first tick snapshot ─────────────────────────────
+    logger.info("Waiting for DataFeeder first snapshot…")
+    feeder_ready.wait(timeout=30)
+    logger.info("DataFeeder ready — attaching shared memory.")
+
+    # ── Attach to shared memory ───────────────────────────────────────────────
+    try:
+        shm = SharedMemory(name=shm_name)
+    except FileNotFoundError:
+        logger.critical(f"SharedMemory '{shm_name}' not found — exiting.")
+        mt5.shutdown()
+        return
+
+    ticks_np = np.ndarray(
+        shape=(len(symbols), FIELDS_PER_SYMBOL),
+        dtype=np.float64,
+        buffer=shm.buf,
+    )
+
+    # ── Pre-allocate circular OHLCV buffers (PHASE 2: zero-copy) ─────────────
+    # FIX: lows initialised to 0.0 (not 1e18) — first-write guard below prevents
+    #      stale zeros from corrupting ATR until the slot receives a real tick.
+    opens    = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
+    highs    = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
+    lows     = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
+    closes   = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
+    volumes  = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
+    buf_ptr      = {s: 0     for s in symbols}  # circular write head
+    buf_count    = {s: 0     for s in symbols}  # real bars written (for seed guard)
+    buf_filled   = {s: False for s in symbols}  # True once BUFFER_SIZE real bars exist
+    candle_ts    = {s: 0.0   for s in symbols}  # epoch of current forming candle
+
+    # ── Seed buffers with initial M5 history from MT5 (once, at startup) ─────
+    logger.info("Seeding candle buffers from MT5 history…")
+    for sym in symbols:
+        rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M5, 0, BUFFER_SIZE)
+        if rates is not None and len(rates) > 0:
+            n = len(rates)
+            opens[sym][:n]   = rates['open']
+            highs[sym][:n]   = rates['high']
+            lows[sym][:n]    = rates['low']
+            closes[sym][:n]  = rates['close']
+            volumes[sym][:n] = rates['tick_volume']
+            buf_ptr[sym]     = n % BUFFER_SIZE
+            buf_count[sym]   = n
+            buf_filled[sym]  = n >= BUFFER_SIZE
+            candle_ts[sym]   = float(rates['time'][-1])
+        else:
+            logger.warning(f"Could not seed {sym} — starting from live ticks only.")
+
+    # ── Per-symbol OFI tick deques (PHASE 3) ─────────────────────────────────
+    ofi_deques: dict = {s: deque(maxlen=OFI_DEPTH) for s in symbols}
+
+    logger.info("Candle buffers seeded. Entering main loop.")
+
+    while not stop_event.is_set():
+        t_start = time.perf_counter()
+
+        # ── TICK INGESTION: update OFI deques and candle buffers ──────────────
+        for sym in symbols:
+            idx = symbol_index[sym]
+
+            bid       = ticks_np[idx, 0]
+            ask       = ticks_np[idx, 1]
+            vol       = ticks_np[idx, 3]
+            tick_time = ticks_np[idx, 4]
+
+            if bid == 0.0 and ask == 0.0:
+                continue   # DataFeeder hasn't written this symbol yet
+
+            mid = (bid + ask) / 2.0
+
+            # Phase 3: feed OFI deque
+            ofi_deques[sym].append((bid, ask, vol))
+
+            # Candle aggregation: advance on M5 boundary
+            if candle_ts[sym] == 0.0:
+                candle_ts[sym] = tick_time - (tick_time % CANDLE_SEC)
+
+            candle_age = tick_time - candle_ts[sym]
+            ptr = buf_ptr[sym]
+
+            if candle_age >= CANDLE_SEC:
+                # Close current candle → advance circular pointer
+                ptr = (ptr + 1) % BUFFER_SIZE
+                buf_ptr[sym] = ptr
+                buf_count[sym] = min(buf_count[sym] + 1, BUFFER_SIZE)
+                if not buf_filled[sym] and buf_count[sym] >= BUFFER_SIZE:
+                    buf_filled[sym] = True
+
+                # Open new candle — FIX: initialise all four in one shot
+                opens[sym][ptr]   = mid
+                highs[sym][ptr]   = mid
+                lows[sym][ptr]    = mid    # ← correct: use mid, not 1e18
+                closes[sym][ptr]  = mid
+                volumes[sym][ptr] = vol
+                candle_ts[sym]    = tick_time - (tick_time % CANDLE_SEC)
+            else:
+                # Update forming candle in-place (zero allocation)
+                closes[sym][ptr]  = mid
+                if mid > highs[sym][ptr]:
+                    highs[sym][ptr] = mid
+                # FIX: guard against zero-initialised slot being treated as a real low
+                if lows[sym][ptr] == 0.0 or mid < lows[sym][ptr]:
+                    lows[sym][ptr] = mid
+                volumes[sym][ptr] += vol
+
+        # ── SIGNAL EVALUATION (every EVAL_INTERVAL seconds) ──────────────────
+        elapsed = time.perf_counter() - t_start
+        if elapsed < EVAL_INTERVAL:
+            time.sleep(EVAL_INTERVAL - elapsed)
+
+        for sym in symbols:
+            try:
+                # CANDLE_SEED_MINIMUM guard — don't publish on cold start
+                if buf_count[sym] < CANDLE_SEED_MINIMUM:
+                    continue
+
+                # Unroll circular buffer into contiguous time-ordered view
+                ptr       = buf_ptr[sym]
+                idx_order = np.roll(np.arange(BUFFER_SIZE), -ptr - 1)
+
+                c = closes[sym][idx_order]
+                h = highs[sym][idx_order]
+                l = lows[sym][idx_order]
+
+                # Strip leading zeros from unseeded slots
+                first_real = int(np.argmax(c > 0))
+                if first_real > 0:
+                    c = c[first_real:]
+                    h = h[first_real:]
+                    l = l[first_real:]
+
+                if len(c) < CANDLE_SEED_MINIMUM:
+                    continue
+
+                # ── Dynamic DNA Core Check ────────────────────────────────────
+                current_hurst_req = live_params[0]
+                current_atr_mult  = live_params[1]
+
+                # ── Phase 2: Vectorised mathematics ──────────────────────────
+                hurst  = _vectorized_hurst(c)
+                regime = _regime_from_hurst(hurst, current_hurst_req)
+                
+                # The raw ATR value scaled by the optimizer's multiplier
+                raw_atr = _vectorized_atr(h, l, c)
+                atr     = raw_atr * current_atr_mult if current_atr_mult > 0 else raw_atr
+                
+                zscore = _vectorized_zscore(c)
+
+                # ── Direction logic per regime ────────────────────────────────
+                if regime == "NO_TRADE":
+                    direction = 0.0
+                elif regime == "RANGING":
+                    # Mean reversion: short at extreme high z, long at extreme low z
+                    if zscore > 2.0:
+                        direction = -1.0
+                    elif zscore < -2.0:
+                        direction = 1.0
+                    else:
+                        direction = 0.0
+                else:  # TRENDING
+                    # Momentum: follow the recent directional bias
+                    recent    = c[-ZSCORE_PERIOD:]
+                    direction = 1.0 if recent[-1] > recent[0] else -1.0
+
+                # ── Phase 3: OFI gate ─────────────────────────────────────────
+                ofi_ok = (
+                    _compute_ofi(ofi_deques[sym], direction)
+                    if direction != 0.0 else True
+                )
+
+                sig = Signal(
+                    symbol    = sym,
+                    direction = direction,
+                    atr       = atr,
+                    hurst     = hurst,
+                    regime    = regime,
+                    ofi_ok    = ofi_ok,
+                    timestamp = time.time(),
+                )
+
+                # Publish only actionable, OFI-cleared signals
+                if direction != 0.0 and ofi_ok:
+                    try:
+                        signal_queue.put_nowait(sig)
+                    except Exception:
+                        pass   # queue full — drop; next cycle will retry
+
+            except Exception as exc:
+                logger.warning(f"[{sym}] evaluation error: {exc}")
+
+    logger.info("Stop event received — releasing resources.")
+    shm.close()
+    mt5.shutdown()
+    logger.info("AlphaEngine exited cleanly.")
+</file>
+
+<file path="core/db_writer.py">
+"""
+core/db_writer.py  —  Omega Architecture: Phase 5 — Zero-Blocking Post-Trade I/O
+══════════════════════════════════════════════════════════════════════════════════
+An isolated background daemon (daemon=True thread inside the Execution Router
+process, or optionally a separate process) that:
+
+  1. Reads trade result dicts from io_queue (multiprocessing.Queue).
+  2. Executes INSERT INTO trades SQL — the ONLY thread that ever touches the DB.
+  3. The main trading loop NEVER waits for a hard-drive write.
+
+This eliminates the "blocking I/O on execution thread" bottleneck described in
+Phase 5 of the Omega Architecture specification.
+
+Table schema (trades):
+    id          INTEGER PK AUTOINCREMENT
+    timestamp   REAL      (unix epoch)
+    symbol      TEXT
+    direction   REAL      (+1 / -1)
+    lot         REAL
+    price       REAL
+    ticket      INTEGER
+    tp          REAL
+    sl          REAL
+    kelly       REAL      (Kelly fraction used)
+    hurst       REAL      (Hurst exponent at signal time)
+    pnl         REAL      (filled in on close — initially NULL)
+"""
+
+import time
+import logging
+import sqlite3
+import queue        # queue.Empty for timeout-based get
+from multiprocessing import Queue as MpQueue
+
+
+DB_PATH = "logs/trades.db"
+
+
+def _make_logger() -> logging.Logger:
+    log = logging.getLogger("db_writer")
+    if not log.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter(
+            "%(asctime)s [DBWriter] %(levelname)s — %(message)s"
+        ))
+        log.addHandler(h)
+    log.setLevel(logging.INFO)
+    return log
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS trades (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp REAL,
+            symbol    TEXT,
+            direction REAL,
+            lot       REAL,
+            price     REAL,
+            ticket    INTEGER,
+            tp        REAL,
+            sl        REAL,
+            kelly     REAL,
+            hurst     REAL,
+            pnl       REAL
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_trades_symbol
+        ON trades (symbol, timestamp DESC)
+    """)
+    conn.commit()
+
+
+def db_writer_daemon(io_queue: MpQueue, stop_event) -> None:
+    """
+    Main function for the DB Writer daemon.
+
+    Designed to run as a daemon thread inside the Execution Router process:
+
+        import threading
+        t = threading.Thread(target=db_writer_daemon, args=(io_queue, stop_event), daemon=True)
+        t.start()
+
+    Or as a separate multiprocessing.Process if desired.
+    """
+    logger = _make_logger()
+    logger.info("DB Writer daemon started.")
+
+    conn = sqlite3.connect(DB_PATH, check_same_thread=True)
+    conn.execute("PRAGMA journal_mode=WAL")     # Write-Ahead Log: concurrent reads + no blocking
+    conn.execute("PRAGMA synchronous=NORMAL")   # Faster than FULL; still crash-safe on most OSes
+    _ensure_schema(conn)
+
+    BATCH_SIZE    = 10      # flush in micro-batches
+    FLUSH_TIMEOUT = 2.0     # seconds — flush even if batch not full
+
+    pending_inserts: list[dict] = []
+    pending_updates: list[dict] = []
+    last_flush = time.monotonic()
+
+    while not stop_event.is_set():
+        try:
+            item = io_queue.get(timeout=0.5)
+            if item.get("action") == "update_pnl":
+                pending_updates.append(item)
+            else:
+                pending_inserts.append(item)
+        except Exception:
+            pass   # queue.Empty or mp.Queue timeout — normal
+
+        now = time.monotonic()
+        should_flush = (
+            (len(pending_inserts) + len(pending_updates)) >= BATCH_SIZE or
+            ((pending_inserts or pending_updates) and (now - last_flush) >= FLUSH_TIMEOUT)
+        )
+
+        if should_flush:
+            # 1. Flush Inserts
+            if pending_inserts:
+                try:
+                    conn.executemany("""
+                        INSERT INTO trades
+                            (timestamp, symbol, direction, lot, price, ticket,
+                             tp, sl, kelly, hurst, pnl)
+                        VALUES
+                            (:timestamp, :symbol, :direction, :lot, :price, :ticket,
+                             :tp, :sl, :kelly, :hurst, NULL)
+                    """, pending_inserts)
+                    conn.commit()
+                    logger.info(f"DB Writer: flushed {len(pending_inserts)} trade records.")
+                    pending_inserts.clear()
+                except Exception as exc:
+                    logger.error(f"DB Writer: INSERT failed — {exc}", exc_info=True)
+
+            # 2. Flush Updates
+            if pending_updates:
+                try:
+                    conn.executemany("""
+                        UPDATE trades 
+                        SET pnl = :pnl 
+                        WHERE ticket = :ticket
+                    """, pending_updates)
+                    conn.commit()
+                    logger.info(f"DB Writer: updated PNL for {len(pending_updates)} records.")
+                    pending_updates.clear()
+                except Exception as exc:
+                    logger.error(f"DB Writer: UPDATE failed — {exc}", exc_info=True)
+                    
+            last_flush = now
+
+    # ── Drain remaining on shutdown ───────────────────────────────────────────
+    while not io_queue.empty():
+        try:
+            item = io_queue.get_nowait()
+            if item.get("action") == "update_pnl":
+                pending_updates.append(item)
+            else:
+                pending_inserts.append(item)
+        except Exception:
+            break
+
+    if pending_inserts:
+        try:
+            conn.executemany("""
+                INSERT INTO trades
+                    (timestamp, symbol, direction, lot, price, ticket,
+                     tp, sl, kelly, hurst, pnl)
+                VALUES
+                    (:timestamp, :symbol, :direction, :lot, :price, :ticket,
+                     :tp, :sl, :kelly, :hurst, NULL)
+            """, pending_inserts)
+            conn.commit()
+            logger.info(f"DB Writer: shutdown flush {len(pending_inserts)} records.")
+        except Exception as exc:
+            logger.error(f"DB Writer: shutdown flush failed — {exc}")
+
+    if pending_updates:
+        try:
+            conn.executemany("""
+                UPDATE trades 
+                SET pnl = :pnl 
+                WHERE ticket = :ticket
+            """, pending_updates)
+            conn.commit()
+            logger.info(f"DB Writer: shutdown update {len(pending_updates)} records.")
+        except Exception as exc:
+            logger.error(f"DB Writer: shutdown update failed — {exc}")
+
+    conn.close()
+    logger.info("DB Writer daemon exited.")
+</file>
+
+<file path="core/execution_router.py">
+"""
+core/execution_router.py  —  Omega Architecture: Process 3 (Execution Router)
+═══════════════════════════════════════════════════════════════════════════════
+Spawned as an independent OS process (bypasses GIL).
+
+Responsibilities:
+  - Listens on signal_queue for Signal namedtuples from the Alpha Engine.
+  - Applies all execution gates:
+      • Spread guard (dynamic ATR-based limit, mirrors auditor.py)
+      • Max concurrency cap
+      • Ghost mode (paper trading when strategy edge is gone)
+      • Commander Override (bypasses safety gates at 100% volume)
+      • Correlation Shield (prevents doubling up on same currency)
+  - PHASE 4: Half-Kelly Criterion lot sizing using rolling 50-trade stats.
+  - Fires async market orders to MT5 via run_in_executor.
+  - PHASE 5: Pushes trade records to io_queue for zero-blocking DB writes.
+  - Real PnL feedback: a position monitor coroutine polls mt5.history_deals_get()
+    every 30 seconds and feeds actual closed PnL into KellyEngine so it learns.
+  - MT5 connection established independently (process-safe pattern).
+
+Fixes vs. previous version:
+  - Spread check: was `info.spread > (info.trade_tick_size and 50 or 50)`
+    (always 50). Now uses dynamic ATR×0.05/point limit, matching auditor.py.
+  - kelly.record(0.0) placeholder removed. Real PnL is fed via _position_monitor.
+  - Max concurrency now correctly counts mt5.positions_get() length.
+  - MT5 init has 3-attempt retry with back-off.
+"""
+
+import time
+import json
+import logging
+import asyncio
+import multiprocessing as mp
+import threading
+from collections import deque
+
+import numpy as np
+
+from core.alpha_engine import Signal
+from core.db_writer    import db_writer_daemon
+
+# ── Logger ────────────────────────────────────────────────────────────────────
+def _make_logger() -> logging.Logger:
+    log = logging.getLogger("exec_router")
+    if not log.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter(
+            "%(asctime)s [ExecRouter] %(levelname)s — %(message)s"
+        ))
+        log.addHandler(h)
+    log.setLevel(logging.INFO)
+    return log
+
+
+# ── MT5 init retry ────────────────────────────────────────────────────────────
+_MT5_RETRIES = 3
+_MT5_BACKOFF  = 2.0
+
+def _connect_mt5(login: int, password: str, server: str, logger: logging.Logger) -> bool:
+    import MetaTrader5 as mt5
+    for attempt in range(1, _MT5_RETRIES + 1):
+        logger.info(f"MT5 init attempt {attempt}/{_MT5_RETRIES}…")
+        if mt5.initialize(login=int(login), password=password, server=server):
+            logger.info("MT5 connection established.")
+            return True
+        logger.warning(f"mt5.initialize() failed: {mt5.last_error()}")
+        if attempt < _MT5_RETRIES:
+            time.sleep(_MT5_BACKOFF * attempt)
+    logger.critical(f"MT5 init FAILED after {_MT5_RETRIES} attempts — process exiting.")
+    return False
+
+
+# ── Currency pair helper (prevent doubling up on same base/quote) ─────────────
+def _get_currencies(sym: str) -> set:
+    """Extracts base and quote currency codes from a Forex symbol name."""
+    clean = ''.join(c for c in sym if c.isupper() and c.isalpha())
+    if len(clean) >= 6:
+        return {clean[:3], clean[3:6]}
+    return {clean}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 4: FRACTIONAL KELLY CRITERION SIZING
+# ══════════════════════════════════════════════════════════════════════════════
+
+class KellyEngine:
+    """
+    Calculates the Half-Kelly position fraction based on a rolling window
+    of the last 50 live trade results fed via record().
+
+    Formula:
+        K  = W − [(1 − W) / R]     ← Full Kelly
+        K½ = K / 2                 ← Half-Kelly for ruin prevention
+
+    Where:
+        W = win probability  (rolling last 50 trades)
+        R = win/loss ratio   (avg profit / avg loss, both positive magnitudes)
+
+    If K ≤ 0, returns 0.0 → automatic Ghost Mode for this symbol.
+    """
+    WINDOW    = 50
+    MAX_KELLY = 0.25   # never bet > 25% of equity even with perfect edge
+
+    def __init__(self):
+        self._trades: deque = deque(maxlen=self.WINDOW)
+
+    def record(self, pnl: float) -> None:
+        """Feed a real closed-trade PnL into the rolling window."""
+        self._trades.append(float(pnl))
+
+    def kelly_fraction(self) -> float:
+        """Returns Half-Kelly ∈ [0.0, MAX_KELLY]."""
+        if len(self._trades) < 5:
+            return 0.01   # conservative bootstrap
+
+        arr    = np.array(self._trades, dtype=np.float64)
+        wins   = arr[arr > 0]
+        losses = arr[arr < 0]
+
+        W = len(wins) / len(arr)
+        if W == 0.0 or len(losses) == 0:
+            return 0.0   # all losses or no data → ghost mode
+
+        avg_win  = wins.mean()
+        avg_loss = np.abs(losses.mean())
+
+        if avg_loss < 1e-10:
+            return self.MAX_KELLY
+
+        R = avg_win / avg_loss
+        K = W - ((1.0 - W) / R)
+
+        if K <= 0.0:
+            return 0.0
+
+        return float(min(K / 2.0, self.MAX_KELLY))
+
+    def lot_size(
+        self,
+        equity:     float,
+        atr:        float,
+        tick_value: float,
+        tick_size:  float,
+        volume_min: float,
+        volume_max: float = 2.0,
+    ) -> float:
+        """
+        Converts the Half-Kelly fraction into a broker lot size.
+        risk_amount = equity × K½
+        lot         = risk_amount / (atr / tick_size × tick_value)
+        """
+        frac = self.kelly_fraction()
+        if frac == 0.0 or atr <= 0 or tick_value <= 0 or tick_size <= 0:
+            return 0.0
+
+        risk_amount  = equity * frac
+        pips_at_risk = atr / tick_size
+        pip_value    = pips_at_risk * tick_value
+
+        if pip_value <= 0:
+            return 0.0
+
+        raw_lot = risk_amount / pip_value
+        return float(max(volume_min, min(round(raw_lot, 2), volume_max)))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DYNAMIC SPREAD LIMIT (mirrors agents/auditor.py)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _spread_hard_floor(symbol: str) -> int:
+    """
+    Returns the minimum permissible spread limit in points for a symbol.
+    The dynamic ATR-based limit is always floored here so that microscopically
+    low ATR values never block legitimate trades during low-volatility sessions.
+
+    Asset-class floors:
+      Crypto  (BTC / ETH / …)           → 500 pts
+      Indices (SP500 / USTEC / GER40 …) →  50 pts
+      Metals  (XAUUSD / XAGUSD …)       →  30 pts
+      Forex   (everything else)          →  10 pts  (1 pip)
+    """
+    sym = symbol.upper()
+    if any(k in sym for k in ("BTC", "ETH", "LTC", "XRP", "BNB", "SOL", "DOGE")):
+        return 500
+    if any(k in sym for k in ("SP500", "USTEC", "US500", "NAS", "DOW", "DAX",
+                               "GER", "UK100", "JP225", "AUS", "FTSE", "CAC")):
+        return 50
+    if any(k in sym for k in ("XAU", "XAG", "GOLD", "SILVER")):
+        return 30
+    return 10   # Forex default (1 pip)
+
+
+def _get_dynamic_spread_limit(mt5_module, sym: str, info) -> int:
+    """
+    Returns the spread limit in points for a given symbol.
+
+    Dynamic computation: ATR(14) × 0.25 / point.
+      (Multiplier raised 0.05 → 0.25 so the spread can occupy up to
+       25% of the M5 candle range without triggering a block.)
+    Hard floor: max(asset_class_floor, dynamic_limit) — consistent with
+      auditor.is_spread_acceptable() so both guards produce identical limits.
+    Falls back to 0.10% of mid-price when ATR rates are unavailable.
+    """
+    floor = _spread_hard_floor(sym)
+    try:
+        rates = mt5_module.copy_rates_from_pos(sym, mt5_module.TIMEFRAME_M5, 0, 15)
+        if rates is not None and len(rates) == 15:
+            tr_vals = [
+                max(
+                    rates[i]['high'] - rates[i]['low'],
+                    abs(rates[i]['high'] - rates[i - 1]['close']),
+                    abs(rates[i]['low']  - rates[i - 1]['close']),
+                )
+                for i in range(1, 15)
+            ]
+            atr     = sum(tr_vals) / 14.0
+            dynamic = int((atr * 0.25) / info.point) if info.point > 0 else floor
+            return max(floor, dynamic)
+    except Exception:
+        pass
+
+    mid     = (info.ask + info.bid) / 2.0
+    dynamic = int((mid * 0.0002) / info.point) if info.point > 0 else floor
+    return max(floor, dynamic)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN PROCESS ENTRY
+# ══════════════════════════════════════════════════════════════════════════════
+
+def execution_router_process(
+    signal_queue:   mp.Queue,
+    io_queue:       mp.Queue,
+    stop_event:     mp.Event,
+    mt5_login:      int,
+    mt5_password:   str,
+    mt5_server:     str,
+    max_concurrent: int = 20,
+):
+    """
+    Execution Router entry point.
+
+    Runs an asyncio event loop inside this process.
+    All MT5 calls are offloaded to a ThreadPoolExecutor so the loop never blocks.
+
+    Also starts the DB Writer daemon thread inside this process.
+    """
+    import MetaTrader5 as mt5
+    from execution.router import LiveOrderRouter
+
+    logger = _make_logger()
+    logger.info(f"ExecRouter PID={mp.current_process().pid}")
+
+    if not _connect_mt5(mt5_login, mt5_password, mt5_server, logger):
+        return
+
+    # ── Phase 5: DB Writer daemon thread (lives beside the router) ────────────
+    _db_stop   = threading.Event()
+    _db_thread = threading.Thread(
+        target=db_writer_daemon, args=(io_queue, _db_stop),
+        daemon=True, name="DBWriterDaemon",
+    )
+    _db_thread.start()
+    logger.info("[PHASE 5] DB Writer daemon started inside ExecRouter.")
+
+    kelly  = KellyEngine()
+    router = LiveOrderRouter()
+
+    # active_symbols: tracks which symbols currently have an open position
+    # so we don't send duplicate orders before the position shows in MT5.
+    active_symbols: set = set()
+
+    # ── Position monitor: feeds real closed PnL into KellyEngine ──────────────
+    last_pnl_check  = time.time()
+    seen_deal_tickets: set = set()
+
+    async def _position_monitor(loop):
+        """
+        Polls MT5 deal history every 30 s.
+        Feeds real closed-trade PnL into KellyEngine (Phase 4).
+        Clears active_symbols when positions close.
+        """
+        nonlocal last_pnl_check
+        while not stop_event.is_set():
+            await asyncio.sleep(30)
+            
+            # --- Live Trade Check ---
+            now = time.time()
+            if now - last_pnl_check >= 30:
+                try:
+                    start = now - 86400   # last 24 h
+                    deals = await loop.run_in_executor(
+                        None, mt5.history_deals_get, start, now + 60
+                    )
+                    if deals:
+                        for deal in deals:
+                            if (
+                                deal.entry == mt5.DEAL_ENTRY_OUT
+                                and deal.ticket not in seen_deal_tickets
+                            ):
+                                seen_deal_tickets.add(deal.ticket)
+                                kelly.record(deal.profit)
+                                active_symbols.discard(deal.symbol)
+                                
+                                try:
+                                    io_queue.put_nowait({
+                                        "action": "update_pnl",
+                                        "ticket": deal.position_id,
+                                        "pnl":    deal.profit
+                                    })
+                                except Exception:
+                                    pass
+
+                                logger.info(
+                                    f"[KELLY] Closed deal #{deal.ticket} | "
+                                    f"{deal.symbol} | PnL={deal.profit:+.2f} | "
+                                    f"K½={kelly.kelly_fraction():.4f}"
+                                )
+                    last_pnl_check = now
+                except Exception as exc:
+                    logger.warning(f"_position_monitor error: {exc}")
+
+    # ── Commander Override helper ──────────────────────────────────────────────
+    def _read_override() -> tuple:
+        """Reads config.json for manual_override and poll_interval."""
+        try:
+            with open("config.json", "r") as f:
+                cfg = json.load(f)
+            return cfg.get("manual_override", False), cfg.get("poll_interval", None)
+        except Exception:
+            return False, None
+
+    # ── Main async routing loop ────────────────────────────────────────────────
+    async def _route_loop():
+        loop = asyncio.get_running_loop()
+
+        # Launch position monitor as a background task
+        asyncio.create_task(_position_monitor(loop))
+
+        _override_logged = False
+
+        while not stop_event.is_set():
+
+            # Non-blocking dequeue — yield immediately if nothing to process
+            try:
+                sig: Signal = signal_queue.get_nowait()
+            except Exception:
+                await asyncio.sleep(0.05)
+                continue
+
+            sym = sig.symbol
+
+            try:
+                # ── Gate: OFI already vetoed by AlphaEngine ─────────────────
+                if not sig.ofi_ok:
+                    logger.info(f"[{sym}] OFI VETO — skip execution.")
+                    continue
+
+                # ── Gate: already have an open position ───────────────────────
+                if sym in active_symbols:
+                    continue
+
+                # ── Commander Override check ──────────────────────────────────
+                manual_override, _ = _read_override()
+                if manual_override and not _override_logged:
+                    logger.critical(
+                        "[SYSTEM] 🔱 COMMANDER OVERRIDE ACTIVE — "
+                        "All safety gates bypassed. Trading at 100% capacity."
+                    )
+                    _override_logged = True
+                elif not manual_override:
+                    _override_logged = False
+
+                # ── Gate: max concurrency ─────────────────────────────────────
+                all_pos = await loop.run_in_executor(None, mt5.positions_get)
+                all_pos = list(all_pos) if all_pos else []
+                if not manual_override and len(all_pos) >= max_concurrent:
+                    logger.warning(f"[{sym}] Max concurrency ({max_concurrent}) — skipping.")
+                    continue
+
+                # ── Gate: symbol info ─────────────────────────────────────────
+                info = await loop.run_in_executor(None, mt5.symbol_info, sym)
+                if info is None:
+                    continue
+
+                # ── Gate: Market Hours / Permissions ──────────────────────────
+                if info.trade_mode != mt5.SYMBOL_TRADE_MODE_FULL:
+                    logger.info(f"[{sym}] Market closed or trade disabled. Skipping.")
+                    continue
+
+                # ── Gate: spread (dynamic ATR-based limit) ────────────────────
+                spread_limit = _get_dynamic_spread_limit(mt5, sym, info)
+                if info.spread > spread_limit:
+                    logger.info(
+                        f"[{sym}] Spread {info.spread} > limit {spread_limit} pts — skipped."
+                    )
+                    continue
+
+                # ── Gate: Correlation Shield (if override inactive) ───────────
+                if not manual_override:
+                    target_currencies = _get_currencies(sym)
+                    correlated = False
+                    for pos in all_pos:
+                        pos_currencies = _get_currencies(pos.symbol)
+                        # Block only if the EXACT same currency pair exists (e.g. EURUSD and USDEUR)
+                        if len(target_currencies.intersection(pos_currencies)) == 2:
+                            logger.info(
+                                f"[{sym}] Correlation Block — identical pair already "
+                                f"exposed via {pos.symbol}. Skipping."
+                            )
+                            correlated = True
+                            break
+                    if correlated:
+                        continue
+
+                # ── Account info ──────────────────────────────────────────────
+                acc = await loop.run_in_executor(None, mt5.account_info)
+                if acc is None:
+                    logger.error("account_info returned None — skipping cycle.")
+                    continue
+                equity = acc.equity
+
+                # ── Gate: regime NO_TRADE ─────────────────────────────────────
+                if sig.regime == "NO_TRADE":
+                    logger.info(f"[{sym}] NO_TRADE regime (Hurst noise band) — skip.")
+                    continue
+
+                # ── Phase 4: Kelly lot size ───────────────────────────────────
+                lot = kelly.lot_size(
+                    equity     = equity,
+                    atr        = sig.atr,
+                    tick_value = info.trade_tick_value,
+                    tick_size  = info.trade_tick_size,
+                    volume_min = info.volume_min,
+                    volume_max = min(info.volume_max, 2.0),
+                )
+
+                # ── Live tick for entry price ─────────────────────────────────
+                tick = await loop.run_in_executor(None, mt5.symbol_info_tick, sym)
+                if tick is None:
+                    continue
+
+                is_buy = sig.direction == 1.0
+                price  = tick.ask if is_buy else tick.bid
+                atr    = sig.atr
+
+                # TP and SL based on regime
+                if sig.regime == "RANGING":
+                    # Mean reversion: tighter TP, wider SL
+                    tp = price + (atr * 2.0) if is_buy else price - (atr * 2.0)
+                    sl = price - (atr * 2.5) if is_buy else price + (atr * 2.5)
+                else:
+                    # Momentum: 3:1 reward-to-risk
+                    tp = price + (atr * 3.0) if is_buy else price - (atr * 3.0)
+                    sl = price - (atr * 2.5) if is_buy else price + (atr * 2.5)
+
+                # MT5 Minimum Lot Safety Clamp
+                if lot < info.volume_min:
+                    raw = lot
+                    lot = info.volume_min
+                    logger.info(f"[{sym}] Kelly Engine choked ({raw:.3f}). Applying MT5 Lot Hard Floor -> {lot}")
+
+                logger.info(
+                    f"[{sym}] ✅ SIGNAL CONFIRMED | dir={'BUY' if is_buy else 'SELL'} | "
+                    f"H={sig.hurst:.3f} | regime={sig.regime} | "
+                    f"lot={lot:.2f} | K½={kelly.kelly_fraction():.4f} | "
+                    f"OFI=CLEAR"
+                )
+
+                # ── Fire async market order ───────────────────────────────────
+                active_symbols.add(sym)
+                try:
+                    res_tuple = await loop.run_in_executor(
+                        None,
+                        router.execute_market,
+                        sym, is_buy, lot, atr, tp, sl
+                    )
+
+                    if isinstance(res_tuple, tuple) and len(res_tuple) == 2:
+                        result, slippage = res_tuple
+                    else:
+                        result, slippage = None, 0.0
+
+                    # ── Phase 5: push record to io_queue (never block here) ───
+                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        
+                        # --- TCA Apeiron Auto-Tuning Integration ---
+                        if not hasattr(router, '_slippage_log'):
+                            router._slippage_log = deque(maxlen=10)
+                        router._slippage_log.append(slippage)
+                        
+                        if len(router._slippage_log) == 10:
+                            avg_slip = sum(router._slippage_log) / 10.0
+                            tca_threshold = info.spread * 0.50
+                            if avg_slip > tca_threshold:
+                                router.iceberg_jitter += 0.50
+                                logger.critical(
+                                    f"⚠️ [TCA BREACH] Avg slippage ({avg_slip:.1f} pts) > limit ({tca_threshold:.1f}). "
+                                    f"Elevating latency! jitter = {router.iceberg_jitter:.2f}s"
+                                )
+                                router._slippage_log.clear()
+
+                        io_queue.put_nowait({
+                            "symbol":    sym,
+                            "direction": sig.direction,
+                            "lot":       lot,
+                            "price":     result.price,
+                            "ticket":    result.deal,
+                            "tp":        tp,
+                            "sl":        sl,
+                            "timestamp": time.time(),
+                            "kelly":     kelly.kelly_fraction(),
+                            "hurst":     sig.hurst,
+                        })
+                        logger.info(
+                            f"[{sym}] Order filled — ticket #{result.deal} | "
+                            f"price={result.price:.5f} | trade record queued for DB."
+                        )
+                    else:
+                        retcode = result.retcode if result else "None"
+                        logger.warning(
+                            f"[{sym}] Order failed — retcode={retcode}. "
+                            "Releasing position lock."
+                        )
+                        active_symbols.discard(sym)
+
+                except Exception as exc:
+                    logger.error(f"[{sym}] Order execution error: {exc}", exc_info=True)
+                    active_symbols.discard(sym)
+
+            except Exception as exc:
+                logger.error(f"[{sym}] Route loop error: {exc}", exc_info=True)
+
+    # ── Run async event loop ───────────────────────────────────────────────────
+    asyncio.run(_route_loop())
+
+    # ── Shutdown ───────────────────────────────────────────────────────────────
+    logger.info("Stop event received — shutting down.")
+    _db_stop.set()
+    _db_thread.join(timeout=5)
+    mt5.shutdown()
+    logger.info("ExecRouter exited cleanly.")
+</file>
+
+<file path="core/shadow_optimizer.py">
+import time
+import sqlite3
+import logging
+import multiprocessing as mp
+import pandas as pd
+import numpy as np
+
+def _make_logger():
+    log = logging.getLogger("shadow_optimizer")
+    if not log.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter(
+            "%(asctime)s [ShadowOptimizer] %(levelname)s — %(message)s"
+        ))
+        log.addHandler(h)
+    log.setLevel(logging.INFO)
+    return log
+
+def run_shadow_optimizer(live_params: mp.Array, stop_event: mp.Event):
+    """
+    Shadow Optimizer Process
+    Wakes up every 4 hours, reads trade outcomes, runs Bayesian Optimization via Optuna,
+    and seamlessly injects the best Hurst and ATR thresholds into the live memory array.
+    """
+    logger = _make_logger()
+    logger.info(f"ShadowOptimizer PID={mp.current_process().pid} started.")
+    
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    
+    while not stop_event.is_set():
+        try:
+            logger.info("[SHADOW AI] Waking up. Starting Optuna optimization study...")
+            
+            # Connect to logs/trades.db
+            conn = sqlite3.connect('file:logs/trades.db?mode=ro', uri=True)
+            
+            # Fetch past 48 hours of trade outcomes for optimization
+            now = time.time()
+            start_48h = now - 48 * 3600
+            
+            query = f"SELECT * FROM trades WHERE timestamp >= {start_48h} AND pnl IS NOT NULL"
+            try:
+                df_trades = pd.read_sql_query(query, conn)
+            except Exception as e:
+                logger.warning(f"Failed to read trades.db (might not exist yet): {e}.")
+                df_trades = pd.DataFrame()
+                
+            conn.close()
+
+            def objective(trial):
+                # Request parameters
+                h_thresh = trial.suggest_float("hurst_threshold", 0.55, 0.75)
+                a_mult = trial.suggest_float("atr_multiplier", 0.05, 0.50)
+                
+                # Base theoretical Sortino if empty DB
+                if df_trades.empty:
+                    import random
+                    return random.uniform(-0.5, 1.5)
+                
+                # Filter trades that would have survived the new Hurst threshold
+                if 'hurst' in df_trades.columns:
+                    sim_trades = df_trades[df_trades['hurst'] >= h_thresh].copy()
+                else:
+                    sim_trades = df_trades.copy()
+                
+                if sim_trades.empty:
+                    return -999.0
+                    
+                # Simulate mock PnL impact from ATR multiplier adjustment (a tighter or wider SL/TP)
+                sim_trades['adj_pnl'] = sim_trades['pnl'] * (1.0 + (a_mult - 0.25))
+                returns = sim_trades['adj_pnl']
+                
+                if len(returns) < 2:
+                    return -999.0
+                    
+                mean_return = returns.mean()
+                downside_returns = returns[returns < 0]
+                downside_std = downside_returns.std() if len(downside_returns) > 1 else 1e-5
+                
+                if downside_std == 0:
+                    downside_std = 1e-5
+                    
+                sortino = (mean_return) / downside_std
+                return sortino
+            
+            study = optuna.create_study(direction="maximize")
+            study.optimize(objective, n_trials=100, timeout=120) 
+            
+            best_hurst = study.best_params["hurst_threshold"]
+            best_atr = study.best_params["atr_multiplier"]
+            
+            # Inject memory
+            with live_params.get_lock():
+                live_params[0] = best_hurst
+                live_params[1] = best_atr
+                
+            logger.info(f"[SHADOW AI] 🧠 Neural re-wire complete. New DNA: Hurst={best_hurst:.4f}, ATR={best_atr:.4f}")
+            
+        except Exception as e:
+            logger.error(f"[SHADOW AI] Optimization error: {e}")
+            
+        # Sleep 4 hours. using stop_event.wait returns True if event is set, meaning we must break.
+        if stop_event.wait(14400):
+            break
+</file>
+
+<file path="execution/router.py">
+import time
+import random
+import asyncio
+import MetaTrader5 as mt5
+
+from utils.logger import setup_logger
+
+logger = setup_logger("router")
+
+MAX_LOT_HARDCAP = 2.0   # absolute ceiling — prevents margin rejection on tight stops and oversized lots
+
+
+# ── Symbol Precision Helper ──────────────────────────────────────────────────
+def _get_digits(symbol: str) -> int:
+    """
+    Query the broker for the number of decimal places used for `symbol` prices.
+
+    MT5 strictly rejects orders whose SL/TP/price have more decimal places
+    than the symbol supports.  Varying by asset class:
+      • Forex major  (EURUSD)  →  5 digits
+      • Yen pair    (USDJPY)  →  3 digits
+      • Gold        (XAUUSD)  →  2 digits
+      • Bitcoin     (BTCUSD)  →  2 digits  (broker-dependent)
+
+    Falls back to 5 (standard Forex) if the symbol cannot be resolved.
+    """
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        logger.warning(f"_get_digits: symbol_info({symbol}) returned None — defaulting to 5.")
+        return 5
+    return int(info.digits)
+
+
+class LiveOrderRouter:
+    """
+    Canonical execution router. All order dispatch and position queries
+    flow through this class. No local state is maintained — every position
+    check hits the MT5 terminal directly.
+    """
+    def __init__(self):
+        # Initial jitter delay boundary representing baseline network/agent latency
+        self.iceberg_jitter = 0.0
+
+    # ── Position Queries ───────────────────────────────────────────────────
+    def get_open_positions(self, symbol: str) -> list:
+        """
+        Query the MT5 terminal directly for active positions on `symbol`.
+        Returns an empty list if none exist or on error.
+        """
+        positions = mt5.positions_get(symbol=symbol)
+        if positions is None:
+            logger.error(
+                f"positions_get failed for {symbol} — "
+                f"error: {mt5.last_error()}"
+            )
+            return []
+        logger.info(f"Open positions on {symbol}: {len(positions)}")
+        return list(positions)
+
+    def get_all_open_positions(self) -> list:
+        """
+        Query the MT5 terminal directly for all active positions across all symbols.
+        Returns an empty list if none exist or on error.
+        """
+        positions = mt5.positions_get()
+        if positions is None:
+            logger.error(f"positions_get failed for all symbols — error: {mt5.last_error()}")
+            return []
+        return list(positions)
+
+    # ── Order Execution with Retry (Trap Maker) ────────────────────────────
+    def execute_trap(
+        self,
+        symbol: str,
+        is_buy: bool,
+        volume: float,
+        atr_value: float,
+        trap_price: float,
+        tp_target: float,
+        strategy_name: str,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
+    ):
+        """
+        Deploy Pending Orders (Traps) as a Maker instead of taking liquidity.
+        """
+        # ── 1. Strategy to Order Type Mapping ────────────────────────────────
+        if strategy_name == "MeanReversion":
+            order_type = mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT
+        elif strategy_name == "MomentumBreakout":
+            order_type = mt5.ORDER_TYPE_BUY_STOP if is_buy else mt5.ORDER_TYPE_SELL_STOP
+        else:
+            logger.error(f"Unknown strategy_name: {strategy_name}")
+            return None
+
+        # ── 2. Symbol meta (precision + stop level + max volume) ─────────────
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            logger.error(f"symbol_info({symbol}) returned None — cannot send order.")
+            return None
+
+        digits       = int(info.digits)
+        point        = info.point
+        stop_level   = int(info.trade_stops_level)
+        spread_pts   = int(info.spread)
+        volume_max   = float(info.volume_max)
+
+        def _round(price: float) -> float:
+            return round(price, digits)
+
+        trap_price = _round(trap_price)
+
+        # ── 3. Fetch live tick price ─────────────────────────────────────────
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            logger.error(f"symbol_info_tick({symbol}) returned None — aborting.")
+            return None
+
+        current_price = tick.ask if is_buy else tick.bid
+
+        # ── 4. Enforce broker minimum stop level for Trap Placement ──────────
+        min_distance = (stop_level + spread_pts) * point
+
+        if abs(trap_price - current_price) < min_distance:
+            logger.warning(
+                f"[{symbol}] 🚫 TRAP REJECTED | Price too close to market (violates stops_level). Edge lost. Abandoning."
+            )
+            return None
+
+        # ── 8. Calculate Trailing Margins ────────────────────────────────────
+        # Apeiron Layer: 2.5x ATR dynamic volatility Stop Loss expansion
+        sl_margin = atr_value * 2.5 
+
+        if is_buy:
+            sl_price = max(0.000001, trap_price - sl_margin)
+            tp_price = _round(tp_target)
+        else:
+            sl_price = trap_price + sl_margin
+            tp_price = _round(tp_target)
+
+        # Enforce SL/TP distance
+        if abs(trap_price - sl_price) < min_distance:
+            widened = _round(min_distance + sl_margin)
+            sl_price = _round(trap_price - widened) if is_buy else _round(trap_price + widened)
+            
+        if abs(trap_price - tp_price) < min_distance:
+            widened_tp = _round(min_distance)
+            tp_price = _round(trap_price + widened_tp) if is_buy else _round(trap_price - widened_tp)
+
+        # ── 6. Cap lot size ──────────────────────────────────────────────────
+        capped_volume = min(float(volume), volume_max, MAX_LOT_HARDCAP)
+        volume = round(capped_volume, 2)
+
+        # Fix #28: Expiration Timezone Crash. Build expiration relative to the broker server clock
+        # extracted from the live tick, rather than the local machine's UTC epoch which could be hours behind.
+        server_time = tick.time if tick else int(time.time())
+
+        # ── 7. Build request (Maker Order) ───────────────────────────────────
+        request = {
+            "action":       mt5.TRADE_ACTION_PENDING,
+            "symbol":       symbol,
+            "volume":       float(volume),
+            "type":         order_type,
+            "price":        trap_price,
+            "sl":           float(sl_price),
+            "tp":           float(tp_price),
+            "deviation":    20,
+            "magic":        100000,
+            "comment":      "algo_trap",
+            "type_time":    mt5.ORDER_TIME_SPECIFIED,
+            "expiration":   int(server_time + (15 * 60)), # 15 minutes TTL
+            "type_filling": mt5.ORDER_FILLING_FOK,
+        }
+
+        # ── 8. Retry loop (For trap placing) ──────────────────────────────────────
+        RETRYABLE = {mt5.TRADE_RETCODE_REQUOTE, mt5.TRADE_RETCODE_CONNECTION}
+
+        for attempt in range(1, max_retries + 1):
+            logger.info(
+                f"[{symbol}] 🪤 TRAP SET | {'Buy' if is_buy else 'Sell'} {order_type} "
+                f"placed at {trap_price:.{digits}f}. Expires in 15 mins."
+            )
+
+            result = mt5.order_send(request)
+
+            if result is None:
+                logger.error(f"order_send returned None — MT5 error: {mt5.last_error()}")
+                return None
+
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"Trap DONE ✓ — deal={result.deal} retcode={result.retcode}")
+                return result
+
+            if result.retcode in RETRYABLE and attempt < max_retries:
+                logger.warning(f"Retryable failure — retcode={result.retcode} ({result.comment}). Retrying in {retry_delay}s…")
+                time.sleep(retry_delay)
+                continue
+
+            logger.error(f"Trap FAILED — retcode={result.retcode} comment='{result.comment}'")
+            return result
+
+        logger.error(f"Trap exhausted all {max_retries} retries for {symbol}.")
+        return None
+
+    # ── Convenience Wrappers ───────────────────────────────────────────────
+    def execute_buy(self, symbol: str, volume: float, atr_value: float, trap_price: float, tp_target: float, strategy_name: str):
+        return self.execute_trap(symbol, True, volume, atr_value, trap_price, tp_target, strategy_name)
+
+    def execute_sell(self, symbol: str, volume: float, atr_value: float, trap_price: float, tp_target: float, strategy_name: str):
+        return self.execute_trap(symbol, False, volume, atr_value, trap_price, tp_target, strategy_name)
+
+    def close_position(self, position):
+        """
+        Closes an open position with a market order.
+        """
+        order_type = mt5.ORDER_TYPE_SELL if position.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        
+        tick = mt5.symbol_info_tick(position.symbol)
+        if tick is None:
+            logger.error(f"close_position failed — symbol_info_tick returned None for {position.symbol}")
+            return None
+            
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": position.ticket,
+            "symbol": position.symbol,
+            "volume": position.volume,
+            "type": order_type,
+            "price": tick.bid if order_type == mt5.ORDER_TYPE_SELL else tick.ask,
+            "deviation": 20,
+            "magic": 100000,
+            "comment": "time_decay_exit",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_FOK,
+        }
+        
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            err = result.comment if result else mt5.last_error()
+            logger.error(f"Failed to close position {position.ticket} on {position.symbol} — {err}")
+        else:
+            logger.info(f"Position {position.ticket} on {position.symbol} successfully closed.")
+        return result
+
+    # ── Market Execution (Immediate Fill) ──────────────────────────────────
+    def execute_market(
+        self,
+        symbol: str,
+        is_buy: bool,
+        volume: float,
+        atr_value: float,
+        tp_target: float,
+        sl_target: float,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
+    ):
+        """
+        Executes an immediate Market Order (Taker) by sending TRADE_ACTION_DEAL.
+        Crucial for StatArb where entering pending limits risks single-leg execution.
+        """
+        order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            logger.error(f"symbol_info({symbol}) returned None — cannot send order.")
+            return None
+
+        digits     = int(info.digits)
+        volume_max = float(info.volume_max)
+        stop_level = int(info.trade_stops_level)
+        spread_pts = int(info.spread)
+        point      = info.point
+        
+        # Cap lot size
+        capped_volume = min(float(volume), volume_max, MAX_LOT_HARDCAP)
+        volume = round(capped_volume, 2)
+
+        min_distance = (stop_level + spread_pts) * point
+
+        RETRYABLE = {mt5.TRADE_RETCODE_REQUOTE, mt5.TRADE_RETCODE_PRICE_CHANGED, mt5.TRADE_RETCODE_CONNECTION}
+
+        for attempt in range(1, max_retries + 1):
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                logger.error(f"symbol_info_tick({symbol}) returned None — aborting market execution.")
+                return None
+
+            mid_price = (tick.ask + tick.bid) / 2.0
+            price = tick.ask if is_buy else tick.bid
+            
+            # ── Smart Order Routing (SOR): Limit Sweeping Slices ──
+            # Only slice if volume >= 4 * volume_min to allow fractional splits safely
+            do_sweep = (volume >= (info.volume_min * 4) and volume >= 0.04)
+            if do_sweep:
+                v_m  = round(volume * 0.25, 2)
+                v_l1 = round(volume * 0.25, 2)
+                v_l2 = round(volume - v_m - v_l1, 2)
+            else:
+                v_m  = volume
+                v_l1 = 0.0
+                v_l2 = 0.0
+            
+            # Compute dynamic SL based on live execution price boundaries
+            sl_price = sl_target
+            tp_price = tp_target
+
+            # ── Enforce Broker Minimum Stop Levels ──
+            if abs(price - sl_price) < min_distance:
+                sl_price = price - (min_distance + (atr_value * 2.5)) if is_buy else price + (min_distance + (atr_value * 2.5))
+                
+            if abs(price - tp_price) < min_distance:
+                tp_price = price + min_distance if is_buy else price - min_distance
+
+            sl_price = round(sl_price, digits)
+            tp_price = round(tp_price, digits)
+
+            request_market = {
+                "action":       mt5.TRADE_ACTION_DEAL,
+                "symbol":       symbol,
+                "volume":       float(v_m),
+                "type":         order_type,
+                "price":        float(price),
+                "sl":           float(sl_price),
+                "tp":           float(tp_price),
+                "deviation":    20,
+                "magic":        200000,
+                "comment":      "sor_market",
+                "type_time":    mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_FOK,
+            }
+
+            logger.info(f"[{symbol}] ⚡ MARKET {order_type} ORDER | {v_m} lots at {price:.{digits}f}")
+
+            result = mt5.order_send(request_market)
+
+            if result is None:
+                logger.error(f"order_send unconditionally failed: {mt5.last_error()}")
+                return None
+
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                # Execution confirmed! Calculate slippage dynamically.
+                slippage_points = abs(result.price - mid_price) / point
+                logger.info(f"Market deal executed! Deal ticket: {result.deal} | Slippage: {slippage_points:.1f} pts")
+                
+                # ── Synthetic Iceberg Limit Sweeping ───────────────────────────
+                if do_sweep and v_l1 > 0:
+                    # 1 pip = 10 points
+                    pip_pts = 10 * point
+                    
+                    if is_buy:
+                        limit_type = mt5.ORDER_TYPE_BUY_LIMIT
+                        p1 = tick.bid - (pip_pts * 0.5)
+                        p2 = tick.bid - (pip_pts * 1.5)
+                    else:
+                        limit_type = mt5.ORDER_TYPE_SELL_LIMIT
+                        p1 = tick.ask + (pip_pts * 0.5)
+                        p2 = tick.ask + (pip_pts * 1.5)
+                    
+                    req_l1 = request_market.copy()
+                    req_l1.update({
+                        "action": mt5.TRADE_ACTION_PENDING,
+                        "type": limit_type,
+                        "volume": float(v_l1),
+                        "price": round(p1, digits),
+                        "comment": "sor_limit_0.5",
+                        "type_time": mt5.ORDER_TIME_GTC,
+                    })
+                    
+                    req_l2 = req_l1.copy()
+                    req_l2.update({
+                        "volume": float(v_l2),
+                        "price": round(p2, digits),
+                        "comment": "sor_limit_1.5",
+                    })
+
+                    res_l1 = mt5.order_send(req_l1)
+                    res_l2 = mt5.order_send(req_l2)
+                    
+                    log_p1 = req_l1['price']
+                    log_p2 = req_l2['price']
+                    logger.info(f"[{symbol}] 🧊 SOR Iceberg Deployed: L1 ({v_l1} @ {log_p1:.{digits}f}), L2 ({v_l2} @ {log_p2:.{digits}f})")
+
+                return result, slippage_points
+
+            if result.retcode in RETRYABLE and attempt < max_retries:
+                logger.warning(f"Retryable failure — retcode={result.retcode} ({result.comment}). Retrying in {retry_delay}s…")
+                time.sleep(retry_delay)
+                continue
+
+            logger.error(f"Market FAILED — retcode={result.retcode} comment='{result.comment}'")
+            return result, 0.0
+
+        logger.error(f"Market execution exhausted all {max_retries} retries for {symbol}.")
+        return None, 0.0
+
+    # ── Iceberg Slicing (Institutional Execution) ──────────────────────────
+    async def execute_iceberg(
+        self,
+        symbol: str,
+        is_buy: bool,
+        total_volume: float,
+        atr_value: float,
+        tp_target: float,
+    ):
+        """
+        Slices a huge market order into 3-7 random sub-orders and executes them
+        with a jittered delay (400ms - 1800ms) to hide presence and reduce slippage.
+        Every slice carries SL/TP — no naked trades allowed.
+        """
+        num_chunks = random.randint(3, 7)
+        chunk_vol  = round(total_volume / num_chunks, 2)
+        
+        # Adjust remainder volume due to rounding
+        chunks = [chunk_vol] * (num_chunks - 1)
+        last_chunk = total_volume - sum(chunks)
+        chunks.append(round(last_chunk, 2))
+        
+        info = mt5.symbol_info(symbol)
+        if not info:
+            logger.error(f"Failed to fetch symbol_info for {symbol} in Iceberg.")
+            return
+
+        digits = int(info.digits)
+        stop_level = int(info.trade_stops_level)
+        spread_pts = int(info.spread)
+        point = info.point
+        
+        min_distance = (stop_level + spread_pts) * point
+        
+        logger.info(f"[{symbol}] 🧊 Initiating Iceberg Slicing. Total={total_volume} in {len(chunks)} chunks.")
+        
+        order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+
+        for i, chunk in enumerate(chunks):
+            # Apeiron Layer: Add TCA mapped dynamic latency buffer (iceberg_jitter)
+            await asyncio.sleep(random.uniform(0.5, 1.5) + self.iceberg_jitter)
+            
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                logger.error(f"Skipping slice {i+1} due to unavailable tick.")
+                continue
+                
+            price    = tick.ask if is_buy else tick.bid
+            
+            # ── Enforce Broker Minimum Stop Levels ──
+            if is_buy:
+                sl = max(0.000001, price - (atr_value * 2.5))
+            else:
+                sl = price + (atr_value * 2.5)
+                
+            # Align limits sequentially
+            if is_buy:
+                tp_price = price + min_distance
+                if tp_target > tp_price: tp_price = tp_target
+                sl_price = price - min_distance
+                if sl < sl_price: sl_price = sl
+            else:
+                tp_price = price - min_distance
+                if tp_target < tp_price: tp_price = tp_target
+                sl_price = price + min_distance
+                if sl > sl_price: sl_price = sl
+                
+            sl_price = round(sl_price, digits)
+            tp_price = round(tp_price, digits)
+            
+            request = {
+                "action":       mt5.TRADE_ACTION_DEAL,
+                "symbol":       symbol,
+                "volume":       float(chunk),
+                "type":         order_type,
+                "price":        float(price),
+                "sl":           float(sl_price),
+                "tp":           float(tp_price),
+                "deviation":    20,
+                "magic":        200000,
+                "comment":      f"iceberg_{i+1}/{num_chunks}",
+                "type_time":    mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_FOK,
+            }
+            
+            def _execute_slice(req):
+                return mt5.order_send(req)
+            
+            # Fire the slice using run_in_executor to avoid blocking the async flow heavily
+            result = await asyncio.get_running_loop().run_in_executor(None, _execute_slice, request)
+            
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"[{symbol}] 🧊 Slice {i+1}/{num_chunks} ({chunk} lots) DONE ✓")
+            else:
+                err = result.comment if result else mt5.last_error()
+                logger.error(f"[{symbol}] 🧊 Slice {i+1} FAILED — {err}")
+                
+            # Random Jitter Wait (400ms - 1800ms)
+            if i < len(chunks) - 1:
+                delay = random.uniform(0.400, 1.800)
+                await asyncio.sleep(delay)
+</file>
+
+<file path="main.py">
+"""
+main.py  —  Omega Architecture Supervisor
+══════════════════════════════════════════════════════════════════════
+Orchestrates three independent OS processes, each with its own
+MT5 connection (bypasses GIL entirely — true hardware parallelism):
+
+  Process 1 (DataFeeder)  : tick fetching → SharedMemory @ 100 Hz
+  Process 2 (AlphaEngine) : SharedMemory → vectorised math → signal_queue
+  Process 3 (ExecRouter)  : signal_queue → Kelly sizing → MT5 orders → io_queue
+  Daemon Thread(DBWriter)  : io_queue → SQLite (never blocks a trading thread)
+
+Critical Windows note:
+  multiprocessing requires `spawn` start method (default on Win).
+  All process entry-points live in `core/` — fully importable.
+"""
+
+import os
+import sys
+import time
+import threading
+import multiprocessing as mp
+from multiprocessing.shared_memory import SharedMemory
+
+from utils.config import (
+    MT5_ACCOUNT, MT5_PASSWORD, MT5_SERVER, SYMBOLS,
+)
+from utils.logger import setup_logger, listener
+from execution.mt5_client import initialize_mt5, get_active_symbols, shutdown_mt5
+from core.data_feeder      import data_feeder_process,     FIELDS_PER_SYMBOL, BYTES_PER_SYMBOL
+from core.alpha_engine     import alpha_engine_process
+from core.execution_router import execution_router_process
+from core.db_writer        import db_writer_daemon
+from core.shadow_optimizer import run_shadow_optimizer
+import ctypes
+
+logger = setup_logger("main")
+
+# ── Supervisor tunables ───────────────────────────────────────────────────────
+MAX_CONCURRENCY    = 20    # maximum simultaneous open trades
+HEALTH_INTERVAL    = 30    # seconds between supervisor health logs
+FEEDER_READY_TIMEOUT = 45  # seconds to wait for DataFeeder first snapshot
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SUPERVISOR
+# ══════════════════════════════════════════════════════════════════════════════
+
+def supervisor_main() -> None:
+    """
+    Omega Supervisor:
+      1. Connects to MT5 briefly (symbol discovery only).
+      2. Creates the SharedMemory block.
+      3. Spawns the three Omega processes.
+      4. Starts the DB Writer daemon thread.
+      5. Health-monitors everything in a blocking loop.
+      6. Handles clean shutdown on KeyboardInterrupt or dead-process detection.
+    """
+    logger.info("═" * 66)
+    logger.info("   Ω OMEGA ARCHITECTURE — Zero-Latency Execution Engine   ")
+    logger.info("   Phase 1: Multiprocess  │ Phase 2: Vectorised NumPy      ")
+    logger.info("   Phase 3: OFI Tick-Tape │ Phase 4: Half-Kelly Sizing     ")
+    logger.info("   Phase 5: Zero-Blocking DB I/O                            ")
+    logger.info("═" * 66)
+
+    # ── Symbol discovery (main process only — then released immediately) ──────
+    logger.info("Connecting to MT5 for symbol discovery…")
+    if not initialize_mt5(login=MT5_ACCOUNT, password=MT5_PASSWORD, server=MT5_SERVER):
+        logger.critical("MT5 connection failed — cannot discover symbols. Exiting.")
+        listener.stop()
+        return
+
+    active_symbols = get_active_symbols()
+    if not active_symbols:
+        logger.warning(
+            f"No dynamic symbols found. Falling back to config default: {SYMBOLS}"
+        )
+        active_symbols = SYMBOLS
+
+    # Release main-process MT5 — each subprocess owns its own connection
+    shutdown_mt5()
+    logger.info(f"Symbol discovery complete: {len(active_symbols)} symbols.")
+
+    # ── SharedMemory block (created here, attached by name in subprocesses) ───
+    n_syms   = len(active_symbols)
+    shm_size = max(n_syms * BYTES_PER_SYMBOL, 64)   # minimum 64 bytes guard
+    shm_name = f"omega_ticks_{os.getpid()}"
+
+    try:
+        shm = SharedMemory(create=True, size=shm_size, name=shm_name)
+    except Exception as exc:
+        logger.critical(f"Failed to create SharedMemory: {exc}")
+        listener.stop()
+        return
+
+    sym_index = {sym: i for i, sym in enumerate(active_symbols)}
+    logger.info(
+        f"[SHM] '{shm_name}' created — {shm_size:,} bytes "
+        f"({n_syms} symbols × {BYTES_PER_SYMBOL} bytes each)"
+    )
+
+    # ── Inter-process primitives ───────────────────────────────────────────────
+    stop_event   = mp.Event()    # broadcast stop: set() → all processes exit
+    feeder_ready = mp.Event()    # set by DataFeeder after first tick snapshot
+    signal_queue = mp.Queue(maxsize=1000)   # AlphaEngine → ExecRouter
+    io_queue     = mp.Queue(maxsize=5000)   # ExecRouter  → DB Writer
+
+    # ── Live Parameters (Shadow Optimizer → Alpha Engine) ──────────────────────
+    # Array of 2 doubles: [0] = Hurst Threshold, [1] = ATR Multiplier
+    # Default seeds: Hurst > 0.60, ATR = 0.25
+    live_params = mp.Array(ctypes.c_double, [0.60, 0.25]) 
+
+    # ── Process instantiation ─────────────────────────────────────────────────
+    p_feeder = mp.Process(
+        target = data_feeder_process,
+        name   = "DataFeeder",
+        daemon = True,
+        args   = (
+            active_symbols, shm_name, sym_index,
+            stop_event,
+            MT5_ACCOUNT, MT5_PASSWORD, MT5_SERVER,
+            feeder_ready,
+        ),
+    )
+
+    p_alpha = mp.Process(
+        target = alpha_engine_process,
+        name   = "AlphaEngine",
+        daemon = True,
+        args   = (
+            active_symbols, shm_name, sym_index,
+            signal_queue, stop_event,
+            MT5_ACCOUNT, MT5_PASSWORD, MT5_SERVER,
+            feeder_ready,
+            live_params,
+        ),
+    )
+
+    p_shadow = mp.Process(
+        target = run_shadow_optimizer,
+        name   = "ShadowOptimizer",
+        daemon = True,
+        args   = (live_params, stop_event),
+    )
+
+    p_router = mp.Process(
+        target = execution_router_process,
+        name   = "ExecRouter",
+        daemon = True,
+        args   = (
+            signal_queue, io_queue, stop_event,
+            MT5_ACCOUNT, MT5_PASSWORD, MT5_SERVER,
+            MAX_CONCURRENCY,
+        ),
+    )
+
+    # ── Phase 5: DB Writer daemon now lives natively inside ExecRouter ────────
+    # Removing supervisor instantiation to prevent double-writes and SQLite locks.
+
+    # ── Launch sequence (ordered: feeder → alpha → router → db writer) ────────
+    logger.info("[PHASE 1] Starting DataFeeder process…")
+    p_feeder.start()
+    logger.info(f"[PHASE 1] DataFeeder PID={p_feeder.pid} ✓")
+
+    logger.info(f"[PHASE 1] Waiting for DataFeeder first snapshot (timeout={FEEDER_READY_TIMEOUT}s)…")
+    if not feeder_ready.wait(timeout=FEEDER_READY_TIMEOUT):
+        logger.critical(
+            f"DataFeeder did not become ready within {FEEDER_READY_TIMEOUT}s — "
+            "possibly an MT5 connection failure inside the subprocess. Aborting."
+        )
+        stop_event.set()
+        p_feeder.join(timeout=5)
+        shm.close()
+        shm.unlink()
+        listener.stop()
+        return
+
+    logger.info("[PHASE 2/3] Starting AlphaEngine process…")
+    p_alpha.start()
+    logger.info(f"[PHASE 2/3] AlphaEngine PID={p_alpha.pid} ✓")
+
+    logger.info("[PHASE 4/5] Starting ExecRouter process…")
+    p_router.start()
+    logger.info(f"[PHASE 4/5] ExecRouter PID={p_router.pid} ✓")
+
+    logger.info("[SHADOW] Starting ShadowOptimizer process…")
+    p_shadow.start()
+    logger.info(f"[SHADOW] ShadowOptimizer PID={p_shadow.pid} ✓")
+
+    logger.info("[PHASE 5] IO Queue initialized for ExecRouter DB writes.")
+
+    logger.info("═" * 66)
+    logger.info("Ω  ALL OMEGA PROCESSES LIVE. Supervisor entering health monitor.")
+    logger.info("═" * 66)
+
+    # ── Supervisor health loop ─────────────────────────────────────────────────
+    procs = [
+        ("DataFeeder",      p_feeder),
+        ("AlphaEngine",     p_alpha),
+        ("ExecRouter",      p_router),
+        ("ShadowOptimizer", p_shadow),
+    ]
+
+    try:
+        while True:
+            time.sleep(HEALTH_INTERVAL)
+
+            dead = [name for name, p in procs if not p.is_alive()]
+            if dead:
+                logger.critical(
+                    f"☠  Dead processes detected: {dead}. "
+                    "Initiating emergency shutdown."
+                )
+                break
+
+            logger.info(
+                f"[HEALTH] DataFeeder={p_feeder.is_alive()} | "
+                f"AlphaEngine={p_alpha.is_alive()} | "
+                f"ExecRouter={p_router.is_alive()} | "
+                f"SignalQ={signal_queue.qsize()} | "
+                f"IOQ={io_queue.qsize()}"
+            )
+
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt received — initiating graceful Omega shutdown.")
+
+    # ── Graceful shutdown sequence ─────────────────────────────────────────────
+    finally:
+        logger.info("Broadcasting stop_event to all Omega processes…")
+        stop_event.set()
+
+        for name, proc in procs:
+            proc.join(timeout=10)
+            if proc.is_alive():
+                logger.warning(f"{name} did not exit within 10 s — force-terminating.")
+                proc.terminate()
+                proc.join(timeout=3)
+            logger.info(f"{name} shutdown complete.")
+
+        logger.info("Omega processes stopped.")
+
+        logger.info("Releasing SharedMemory…")
+        try:
+            shm.close()
+            shm.unlink()
+            logger.info(f"SharedMemory '{shm_name}' released.")
+        except Exception as exc:
+            logger.warning(f"SharedMemory cleanup warning: {exc}")
+
+        logger.info("Ω  Omega Engine stopped cleanly. Goodbye.")
+        listener.stop()
+
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    # Windows requires `spawn` (the default) — make it explicit and idempotent
+    mp.set_start_method("spawn", force=True)
+    supervisor_main()
+</file>
+
+<file path="requirements.txt">
+MetaTrader5
+pandas
+numpy
+python-dotenv
+
+# asyncio is part of the Python standard library (>= 3.4) — no pip install needed
+asyncio
+fastapi
+uvicorn
+websockets
+aiofiles
+</file>
+
+</files>

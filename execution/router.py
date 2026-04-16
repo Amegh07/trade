@@ -209,7 +209,7 @@ class LiveOrderRouter:
     def execute_sell(self, symbol: str, volume: float, atr_value: float, trap_price: float, tp_target: float, strategy_name: str):
         return self.execute_trap(symbol, False, volume, atr_value, trap_price, tp_target, strategy_name)
 
-    def close_position(self, position):
+    def close_position(self, position, comment=None):
         """
         Closes an open position with a market order.
         """
@@ -229,7 +229,7 @@ class LiveOrderRouter:
             "price": tick.bid if order_type == mt5.ORDER_TYPE_SELL else tick.ask,
             "deviation": 20,
             "magic": 100000,
-            "comment": "time_decay_exit",
+            "comment": comment if comment else "time_decay_exit",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_FOK,
         }
@@ -251,6 +251,7 @@ class LiveOrderRouter:
         atr_value: float,
         tp_target: float,
         sl_target: float,
+        comment: str = "sor_market",
         max_retries: int = 3,
         retry_delay: float = 1.0,
     ):
@@ -324,7 +325,7 @@ class LiveOrderRouter:
                 "tp":           float(tp_price),
                 "deviation":    20,
                 "magic":        200000,
-                "comment":      "sor_market",
+                "comment":      comment,
                 "type_time":    mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_FOK,
             }

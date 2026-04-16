@@ -23,6 +23,7 @@ Shared Memory Layout per symbol (8 × float64 = 64 bytes):
 
 import time
 import logging
+import sqlite3
 import multiprocessing as mp
 import numpy as np
 from multiprocessing.shared_memory import SharedMemory
@@ -121,6 +122,7 @@ def data_feeder_process(
     logger.info("Shared memory attached. Entering tick loop.")
     _ready_signalled = False
     interval = 1.0 / SHM_POLL_HZ   # 10 ms target loop
+    last_acc_check = 0.0
 
     while not stop_event.is_set():
         t_start = time.perf_counter()
@@ -138,9 +140,26 @@ def data_feeder_process(
                     buf[idx, 5] = float(tick.flags)
                     info = mt5.symbol_info(sym)
                     buf[idx, 6] = float(info.spread) if info else 0.0
-                    buf[idx, 7] = 0.0   # reserved
+                    buf[idx, 7] += 1.0   # LOCK-FREE ATOMIC: increment version counter LAST
             except Exception as exc:
                 logger.warning(f"Tick error [{sym}]: {exc}")
+
+        # ── MT5 Account Bridge (1Hz) ──────────────────────────────────────────
+        if t_start - last_acc_check >= 1.0:
+            last_acc_check = t_start
+            try:
+                acc = mt5.account_info()
+                if acc is not None:
+                    conn = sqlite3.connect("logs/trades.db", timeout=2.0)
+                    c = conn.cursor()
+                    c.execute("""
+                        INSERT OR REPLACE INTO account_state (id, equity, balance, margin_free, timestamp)
+                        VALUES (1, ?, ?, ?, ?)
+                    """, (acc.equity, acc.balance, acc.margin_free, time.time()))
+                    conn.commit()
+                    conn.close()
+            except Exception as db_err:
+                pass # Don't lock the tick loop if the database is busy
 
         # Signal the AlphaEngine only after the first complete snapshot
         if not _ready_signalled:

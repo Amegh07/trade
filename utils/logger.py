@@ -13,10 +13,10 @@ log_queue = queue.Queue(-1)
 
 _formatter = logging.Formatter('%(asctime)s - %(module)s - %(levelname)s - %(message)s')
 
-# Rotating File Handler (Max 50MB -> 50 * 1024 * 1024, keeping 5 backups)
+# Rotating File Handler (Max 10MB -> 10 * 1024 * 1024, keeping 5 backups)
 _file_handler = logging.handlers.RotatingFileHandler(
     log_file,
-    maxBytes=50 * 1024 * 1024, 
+    maxBytes=10 * 1024 * 1024, 
     backupCount=5,
     encoding='utf-8'
 )

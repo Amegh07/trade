@@ -1,60 +1,76 @@
 """
 core/alpha_engine.py  —  Omega Architecture: Process 2 (Alpha Engine)
 ═══════════════════════════════════════════════════════════════════════
-Spawned as an independent OS process (bypasses GIL).
-
-Responsibilities:
-  - Waits for DataFeeder's ready_event, then attaches to SharedMemory.
-  - Maintains per-symbol circular OHLCV buffers (pre-allocated np.zeros(200))
-    updated in-place via a rolling pointer — zero new MT5 candle fetches
-    during steady-state operation.
-  - Runs ALL mathematics as pure NumPy matrix operations:
-      Phase 2: Hurst Exponent (R/S), ATR (Wilder EWM), Z-Score
-      Phase 3: Order Flow Imbalance (tick-level bid/ask delta vectors)
-  - Publishes typed Signal namedtuples to a multiprocessing.Queue
-    consumed by the Execution Router.
-
-Fixes vs. previous version:
-  - lows[] buffer: initialised to np.zeros(); first-write guard prevents
-    stale 1e18 sentinel contaminating ATR on seeded symbols.
-  - CANDLE_SEED_MINIMUM guard: signals are not published until at least
-    CANDLE_SEED_MINIMUM bars of real data are in the buffer.
-  - MT5 init retry via _connect_mt5() (shared pattern with DataFeeder).
+Architectural Rewrite: Delta-Neutral Statistical Arbitrage (Pairs Trading)
 """
 
 import time
 import logging
+import sqlite3
+import uuid
 import multiprocessing as mp
 import numpy as np
+import statsmodels.api as sm
+import pandas as pd
+from statsmodels.tsa.stattools import coint
 from collections import deque
 from multiprocessing.shared_memory import SharedMemory
-from typing import NamedTuple
+from typing import NamedTuple, Dict, List, Tuple
 
 from core.data_feeder import FIELDS_PER_SYMBOL, BYTES_PER_SYMBOL
 
 # ── Signal wire type ─────────────────────────────────────────────────────────
 class Signal(NamedTuple):
-    symbol:    str
-    direction: float     # +1.0 = BUY, -1.0 = SELL, 0.0 = FLAT
-    atr:       float
-    hurst:     float
-    regime:    str       # "TRENDING" | "RANGING" | "NO_TRADE"
-    ofi_ok:    bool      # True = OFI clear, False = OFI vetoed
-    timestamp: float     # unix epoch
-
+    symbol:       str
+    signal:       float     # +1.0 = BUY, -1.0 = SELL, 0.0 = FLAT
+    confidence:   float     # [0.0 - 1.0] (1 - p-value)
+    regime:       str       # "COINTEGRATED" | "DIVERGING"
+    action:       str       # "ENTER_LONG" | "ENTER_SHORT" | "CLOSE"
+    atr:          float
+    z_score:      float     # Current Spread Z-Score
+    ofi_ok:       bool      
+    timestamp:    float
+    # STATARB EXTENSIONS
+    basket_id:    str       # Links multiple legs of a single trade
+    beta:         float     # Hedge Ratio
+    leg_role:     str       # 'PRIMARY' | 'HEDGE'
+    # ARCHITECT UPGRADE: Execution & Safety Metadata
+    hedge_symbol: str       # To assist router with margin checks
+    hedge_beta:   float     # Beta at signal time
+    exit_reason:  str       # "MEAN_REVERSION" | "Z_HARD_STOP" | "TIME_STOP" | "COINT_BREAKDOWN"
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-BUFFER_SIZE        = 200    # circular candle buffer (pre-allocated)
-CANDLE_SEED_MINIMUM = 30   # must have ≥ this many real bars before publishing
-HURST_LAGS         = 60    # max R/S lags for Hurst calculation
-ATR_PERIOD         = 14    # EWM alpha = 1/14
-ZSCORE_PERIOD      = 20    # rolling Z-Score window
-OFI_DEPTH          = 100   # tick-level deque maxlen
-CANDLE_SEC         = 300   # 5-minute candle duration in seconds
-EVAL_INTERVAL      = 5.0   # full signal evaluation every N seconds
-MT5_INIT_RETRIES   = 3
-MT5_INIT_BACKOFF   = 2.0
+BUFFER_SIZE         = 600    # Need > 500 for cointegration check
+CANDLE_SEED_MINIMUM = 500   
+ZSCORE_WINDOW       = 50
+COINT_P_LIMIT       = 0.05
+CANDLE_SEC          = 300   
+EVAL_INTERVAL       = 10.0  # Statistical tests take more time
+MT5_INIT_RETRIES    = 3
+MT5_INIT_BACKOFF    = 2.0
+Z_HARD_STOP         = 4.5
+TIME_STOP_PERIODS   = 96    # Redefined: 24 hours on M15 (architect ruling)
 
+# Predefined tradable pairs — Economically tethered, high correlation spreads
+TRADABLE_PAIRS = [
+    # --- THE COMMODITY BLOC (Highly Tethered) ---
+    ("AUDUSD", "NZDUSD"),  # The classic Oceanic spread
+    ("AUDJPY", "NZDJPY"),  # Oceanic yield vs safe haven
+    ("USDCAD", "AUDUSD"),  # Oil vs Metals (Inverted beta)
+    
+    # --- THE EUROPEAN CORE ---
+    ("EURUSD", "GBPUSD"),  # Eurozone vs UK
+    ("EURGBP", "EURCHF"),  # European cross-flows
+    ("EURJPY", "GBPJPY"),  # European yield vs Japanese yield
+    
+    # --- THE SAFE HAVENS ---
+    ("USDCHF", "USDJPY"),  # Swiss Franc vs Japanese Yen
+    ("EURCHF", "USDCHF"),  # Euro vs Dollar (Swiss anchored)
+
+    # --- THE PRECIOUS METALS (If your broker offers them) ---
+    ("XAUUSD", "XAGUSD"),  # Gold vs Silver (The ultimate stat-arb pair)
+    ("XAUEUR", "XAGEUR"),  # Gold vs Silver (Euro priced)
+]
 
 # ── Logger ────────────────────────────────────────────────────────────────────
 def _make_logger() -> logging.Logger:
@@ -67,7 +83,6 @@ def _make_logger() -> logging.Logger:
         log.addHandler(h)
     log.setLevel(logging.INFO)
     return log
-
 
 def _connect_mt5(login: int, password: str, server: str, logger: logging.Logger) -> bool:
     import MetaTrader5 as mt5
@@ -82,148 +97,76 @@ def _connect_mt5(login: int, password: str, server: str, logger: logging.Logger)
     logger.critical(f"MT5 init FAILED after {MT5_INIT_RETRIES} attempts — process exiting.")
     return False
 
-
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 2: VECTORIZED MATHEMATICS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _vectorized_atr(
-    highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = ATR_PERIOD
-) -> float:
-    """
-    Pure-NumPy Wilder ATR.  No Python loops over candles.
-    Returns the Wilder EWM ATR scalar for the full buffer.
-    """
-    if len(closes) < period + 1:
-        valid_range = highs - lows
-        return float(np.std(valid_range[valid_range > 0])) if np.any(valid_range > 0) else 0.0
-
-    prev_c = closes[:-1]
-    curr_h = highs[1:]
-    curr_l = lows[1:]
-
-    tr = np.maximum(
-        curr_h - curr_l,
-        np.maximum(
-            np.abs(curr_h - prev_c),
-            np.abs(curr_l - prev_c),
-        )
-    )
-
-    alpha   = 1.0 / period
-    weights = (1.0 - alpha) ** np.arange(len(tr) - 1, -1, -1, dtype=np.float64)
-    w_sum   = weights.sum()
-    return float(np.dot(weights, tr) / w_sum) if w_sum > 0 else 0.0
-
-
-def _vectorized_hurst(closes: np.ndarray, max_lags: int = HURST_LAGS) -> float:
-    """
-    Pure-NumPy Hurst Exponent via Rescaled Range (R/S) analysis.
-    All reshape / cumsum / std operations are NumPy matrix ops —
-    the outer Python loop is over ~58 lag values (trivial cost).
-    Returns H clamped to [0.0, 1.0].
-    """
-    if len(closes) < 4:
-        return 0.5
-
-    safe_closes = np.where(closes == 0, 1e-10, closes)
-    ts = np.log(safe_closes[1:] / safe_closes[:-1])
-    ts = ts[np.isfinite(ts)]
-    n  = len(ts)
-    if n < 4:
-        return 0.5
-
-    max_lag = min(max_lags, n // 2)
-    lags    = np.arange(2, max(3, max_lag), dtype=np.int32)
-
-    rs_vals  = []
-    lag_vals = []
-
-    for lag in lags:
-        m = n // lag
-        if m == 0:
-            continue
-        chunk = ts[:m * lag].reshape(m, lag)   # ← all inner math is matrix ops
-        means = chunk.mean(axis=1, keepdims=True)
-        dev   = chunk - means
-        cum   = dev.cumsum(axis=1)
-        r     = cum.max(axis=1) - cum.min(axis=1)
-        s     = chunk.std(axis=1)
-        s     = np.where(s == 0, 1e-10, s)
-        rs_vals.append(float(np.mean(r / s)))
-        lag_vals.append(int(lag))
-
-    if len(lag_vals) < 2:
-        return 0.5
-
-    log_lags = np.log(np.array(lag_vals, dtype=np.float64))
-    log_rs   = np.log(np.array(rs_vals,  dtype=np.float64))
-    valid    = np.isfinite(log_lags) & np.isfinite(log_rs)
-    if valid.sum() < 2:
-        return 0.5
-
-    poly = np.polyfit(log_lags[valid], log_rs[valid], 1)
-    return float(np.clip(poly[0], 0.0, 1.0))
-
-
-def _vectorized_zscore(series: np.ndarray, period: int = ZSCORE_PERIOD) -> float:
-    """Vectorised rolling Z-Score on the tail slice."""
-    if len(series) < period:
-        return 0.0
-    window = series[-period:]
-    mu, sigma = window.mean(), window.std()
-    if sigma < 1e-12:
-        return 0.0
-    return float((series[-1] - mu) / sigma)
-
-
-def _regime_from_hurst(h: float, hurst_threshold: float) -> str:
-    if h > hurst_threshold:
-        return "TRENDING"
-    elif h < (hurst_threshold - 0.10):
-        return "RANGING"
-    return "NO_TRADE"
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PHASE 3: OFI (per-symbol tick deque)
+# STATISTICAL ARBITRAGE UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _compute_ofi(tick_deque: deque, signal: float) -> bool:
+def _calculate_spread_stats(y: np.ndarray, x: np.ndarray, logger: logging.Logger = None) -> Tuple[float, float, float, np.ndarray]:
     """
-    Order Flow Imbalance gate — pure NumPy, no Python loops over ticks.
-    If a BUY signal faces dominant ask-side absorption (sell pressure > 65%) → VETO.
-    If a SELL signal faces dominant bid-side absorption (buy pressure > 65%) → VETO.
-    Returns True (CLEAR) or False (VETOED).
+    Performs Cointegration test & OLS to find Beta and Z-Score.
+    Returns: (p_value, beta, current_z, spread_series) or (None, None, None, None) on error.
+    
+    MATH GUARD: Validates array fitness before statistical operations.
+    - Checks variance > 1e-8 to detect flat/degenerate arrays from ffill() on missing data.
+    - Catches statsmodels LinAlgError/ValueError and returns None tuple to skip pair.
     """
-    if len(tick_deque) < 10:
-        return True   # not enough microstructure data — let through
+    if logger is None:
+        logger = _make_logger()
+    
+    try:
+        # ── MATH GUARD 1: Validate input arrays for degeneracy ──────────
+        y_var = np.var(y)
+        x_var = np.var(x)
+        if y_var < 1e-8 or x_var < 1e-8:
+            logger.warning(f"[Math Guard] Degenerate/flat arrays detected (y_var={y_var:.2e}, x_var={x_var:.2e}). Skipping statistical evaluation.")
+            return None, None, None, None
+        
+        # 1. Cointegration Test
+        _, p_value, _ = coint(y, x)
+        
+        # 2. OLS for Hedge Ratio (Beta)
+        # y = beta * x + constant
+        x_const = sm.add_constant(x)
+        model = sm.OLS(y, x_const).fit()
+        beta = model.params[1]
+        constant = model.params[0]
+        
+        # Validate outputs are finite
+        if not (np.isfinite(p_value) and np.isfinite(beta) and np.isfinite(constant)):
+            logger.warning(f"[Math Guard] Non-finite statistics detected (p={p_value}, beta={beta}). Skipping pair.")
+            return None, None, None, None
+        
+        # 3. Calculate Spread
+        spread = y - (beta * x + constant)
+        
+        # 4. Z-Score calculation
+        if len(spread) < ZSCORE_WINDOW:
+            return p_value, beta, 0.0, spread
+            
+        window = spread[-ZSCORE_WINDOW:]
+        mu, sigma = np.mean(window), np.std(window)
+        
+        if sigma < 1e-12:
+            return p_value, beta, 0.0, spread
+            
+        z_score = (spread[-1] - mu) / sigma
+        if not np.isfinite(z_score):
+            logger.warning(f"[Math Guard] Non-finite z-score detected ({z_score}). Returning 0.0.")
+            z_score = 0.0
+        
+        return p_value, beta, z_score, spread
+    
+    except (np.linalg.LinAlgError, ValueError) as exc:
+        logger.warning(f"[Math Guard] Statsmodels error: {type(exc).__name__}: {exc}. Skipping pair.")
+        return None, None, None, None
+    except Exception as exc:
+        logger.error(f"[Math Guard] Unexpected error in cointegration/OLS: {exc}", exc_info=False)
+        return None, None, None, None
 
-    ticks = np.array(tick_deque, dtype=np.float64)   # shape (N, 3): bid, ask, vol
-    vols  = ticks[:, 2]
-
-    bid_delta = np.diff(ticks[:, 0], prepend=ticks[0, 0])
-    ask_delta = np.diff(ticks[:, 1], prepend=ticks[0, 1])
-
-    buyer_mask  = (bid_delta > 0) | (ask_delta < 0)
-    seller_mask = (bid_delta < 0) | (ask_delta > 0)
-
-    bid_vol = vols[buyer_mask].sum()
-    ask_vol = vols[seller_mask].sum()
-    total   = bid_vol + ask_vol
-
-    if total < 1e-10:
-        return True
-
-    buy_pressure  = bid_vol / total
-    sell_pressure = ask_vol / total
-
-    if signal == 1.0 and sell_pressure > 0.65:
-        return False   # sellers dominating micro-tape → VETO BUY
-    if signal == -1.0 and buy_pressure > 0.65:
-        return False   # buyers dominating micro-tape → VETO SELL
-    return True
-
+def _vectorized_atr(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = 14) -> float:
+    if len(closes) < period + 1: return 0.0
+    tr = np.maximum(highs[1:] - lows[1:], np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])))
+    return float(np.mean(tr[-period:]))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN PROCESS ENTRY
@@ -241,29 +184,15 @@ def alpha_engine_process(
     feeder_ready: mp.Event,
     live_params:  mp.Array,
 ):
-    """
-    Alpha Engine entry point.
-
-    Reads live ticks from shared memory written by the Data Feeder.
-    Applies vectorised mathematics to pre-allocated circular OHLCV buffers.
-    Publishes Signal namedtuples to signal_queue for the Execution Router.
-    """
     import MetaTrader5 as mt5
 
     logger = _make_logger()
-    logger.info(f"AlphaEngine PID={mp.current_process().pid} | {len(symbols)} symbols")
+    logger.info(f"AlphaEngine PID={mp.current_process().pid} | StatArb Mode")
 
-    # ── Independent MT5 init (needed for initial candle seed + HTF data) ──────
     if not _connect_mt5(mt5_login, mt5_password, mt5_server, logger):
         return
-    logger.info("MT5 connection established.")
 
-    # ── Wait for DataFeeder's first tick snapshot ─────────────────────────────
-    logger.info("Waiting for DataFeeder first snapshot…")
     feeder_ready.wait(timeout=30)
-    logger.info("DataFeeder ready — attaching shared memory.")
-
-    # ── Attach to shared memory ───────────────────────────────────────────────
     try:
         shm = SharedMemory(name=shm_name)
     except FileNotFoundError:
@@ -271,186 +200,263 @@ def alpha_engine_process(
         mt5.shutdown()
         return
 
-    ticks_np = np.ndarray(
-        shape=(len(symbols), FIELDS_PER_SYMBOL),
-        dtype=np.float64,
-        buffer=shm.buf,
-    )
+    ticks_np = np.ndarray(shape=(len(symbols), FIELDS_PER_SYMBOL), dtype=np.float64, buffer=shm.buf)
 
-    # ── Pre-allocate circular OHLCV buffers (PHASE 2: zero-copy) ─────────────
-    # FIX: lows initialised to 0.0 (not 1e18) — first-write guard below prevents
-    #      stale zeros from corrupting ATR until the slot receives a real tick.
-    opens    = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
-    highs    = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
-    lows     = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
-    closes   = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
-    volumes  = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
-    buf_ptr      = {s: 0     for s in symbols}  # circular write head
-    buf_count    = {s: 0     for s in symbols}  # real bars written (for seed guard)
-    buf_filled   = {s: False for s in symbols}  # True once BUFFER_SIZE real bars exist
-    candle_ts    = {s: 0.0   for s in symbols}  # epoch of current forming candle
+    # Historical Buffers
+    closes     = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
+    highs      = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
+    lows       = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
+    times      = {s: np.zeros(BUFFER_SIZE, dtype=np.float64) for s in symbols}
+    buf_ptr    = {s: 0     for s in symbols}  
+    buf_count  = {s: 0     for s in symbols}  
+    candle_ts  = {s: 0.0   for s in symbols}  
 
-    # ── Seed buffers with initial M5 history from MT5 (once, at startup) ─────
-    logger.info("Seeding candle buffers from MT5 history…")
+    logger.info("Seeding candle buffers for pairs...")
     for sym in symbols:
         rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M5, 0, BUFFER_SIZE)
         if rates is not None and len(rates) > 0:
             n = len(rates)
-            opens[sym][:n]   = rates['open']
-            highs[sym][:n]   = rates['high']
-            lows[sym][:n]    = rates['low']
-            closes[sym][:n]  = rates['close']
-            volumes[sym][:n] = rates['tick_volume']
-            buf_ptr[sym]     = n % BUFFER_SIZE
-            buf_count[sym]   = n
-            buf_filled[sym]  = n >= BUFFER_SIZE
-            candle_ts[sym]   = float(rates['time'][-1])
-        else:
-            logger.warning(f"Could not seed {sym} — starting from live ticks only.")
+            closes[sym][:n] = rates['close']
+            highs[sym][:n]  = rates['high']
+            lows[sym][:n]   = rates['low']
+            times[sym][:n]  = rates['time'].astype(np.float64)
+            buf_ptr[sym]    = n % BUFFER_SIZE
+            buf_count[sym]  = n
+            candle_ts[sym]  = float(rates['time'][-1])
 
-    # ── Per-symbol OFI tick deques (PHASE 3) ─────────────────────────────────
-    ofi_deques: dict = {s: deque(maxlen=OFI_DEPTH) for s in symbols}
+    # Tracking open baskets for exit logic
+    # active_baskets: basket_id -> {"start_time": float, "asset_a": str, "asset_b": str}
+    active_baskets = {} 
 
-    logger.info("Candle buffers seeded. Entering main loop.")
+    logger.info("Syncing existing positions from MT5...")
+    try:
+        current_pos = mt5.positions_get()
+        if current_pos:
+            for pos in current_pos:
+                # Recover basket_id from comment if possible
+                b_id = pos.comment if pos.comment.startswith("BSKT_") else None
+                if b_id:
+                    if b_id not in active_baskets:
+                        active_baskets[b_id] = {
+                            "start_time": pos.time, # epoch seconds
+                            "symbols": set()
+                        }
+                    active_baskets[b_id]["symbols"].add(pos.symbol)
+            logger.info(f"Recovered {len(active_baskets)} active baskets from MT5.")
+    except Exception as exc:
+        logger.warning(f"Failed to sync positions on startup: {exc}")
+
+    logger.info("Entering StatArb Decision Loop.")
 
     while not stop_event.is_set():
         t_start = time.perf_counter()
 
-        # ── TICK INGESTION: update OFI deques and candle buffers ──────────────
+        # 0. Sync Dynamic Thresholds
+        with live_params.get_lock():
+            z_entry_dynamic = live_params[0]
+            z_exit_dynamic  = live_params[1]
+
+        # 1. Tick Ingestion & Candle Building
         for sym in symbols:
             idx = symbol_index[sym]
-
-            bid       = ticks_np[idx, 0]
-            ask       = ticks_np[idx, 1]
-            vol       = ticks_np[idx, 3]
-            tick_time = ticks_np[idx, 4]
-
-            if bid == 0.0 and ask == 0.0:
-                continue   # DataFeeder hasn't written this symbol yet
-
-            mid = (bid + ask) / 2.0
-
-            # Phase 3: feed OFI deque
-            ofi_deques[sym].append((bid, ask, vol))
-
-            # Candle aggregation: advance on M5 boundary
-            if candle_ts[sym] == 0.0:
-                candle_ts[sym] = tick_time - (tick_time % CANDLE_SEC)
-
-            candle_age = tick_time - candle_ts[sym]
-            ptr = buf_ptr[sym]
-
-            if candle_age >= CANDLE_SEC:
-                # Close current candle → advance circular pointer
-                ptr = (ptr + 1) % BUFFER_SIZE
-                buf_ptr[sym] = ptr
-                buf_count[sym] = min(buf_count[sym] + 1, BUFFER_SIZE)
-                if not buf_filled[sym] and buf_count[sym] >= BUFFER_SIZE:
-                    buf_filled[sym] = True
-
-                # Open new candle — FIX: initialise all four in one shot
-                opens[sym][ptr]   = mid
-                highs[sym][ptr]   = mid
-                lows[sym][ptr]    = mid    # ← correct: use mid, not 1e18
-                closes[sym][ptr]  = mid
-                volumes[sym][ptr] = vol
-                candle_ts[sym]    = tick_time - (tick_time % CANDLE_SEC)
+            
+            # ── LOCK-FREE ATOMIC READ: verify version counter ──────────────────
+            for retry_count in range(3):
+                seq_before = ticks_np[idx, 7]
+                bid = ticks_np[idx, 0]
+                ask = ticks_np[idx, 1]
+                vol = ticks_np[idx, 3]
+                tick_time = ticks_np[idx, 4]
+                seq_after = ticks_np[idx, 7]
+                
+                if seq_before == seq_after:  # Atomicity verified
+                    break
             else:
-                # Update forming candle in-place (zero allocation)
-                closes[sym][ptr]  = mid
-                if mid > highs[sym][ptr]:
-                    highs[sym][ptr] = mid
-                # FIX: guard against zero-initialised slot being treated as a real low
-                if lows[sym][ptr] == 0.0 or mid < lows[sym][ptr]:
-                    lows[sym][ptr] = mid
-                volumes[sym][ptr] += vol
+                # All retries exhausted, use best-effort values
+                logger.debug(f"Atomic read retried 3x for {sym}, using best-effort")
+            
+            if bid == 0.0: continue
+            
+            mid = (bid + ask) / 2.0
+            if candle_ts[sym] == 0.0: candle_ts[sym] = tick_time - (tick_time % CANDLE_SEC)
 
-        # ── SIGNAL EVALUATION (every EVAL_INTERVAL seconds) ──────────────────
+            if tick_time - candle_ts[sym] >= CANDLE_SEC:
+                buf_ptr[sym] = (buf_ptr[sym] + 1) % BUFFER_SIZE
+                buf_count[sym] = min(buf_count[sym] + 1, BUFFER_SIZE)
+                closes[sym][buf_ptr[sym]] = mid
+                highs[sym][buf_ptr[sym]] = mid
+                lows[sym][buf_ptr[sym]] = mid
+                times[sym][buf_ptr[sym]] = tick_time - (tick_time % CANDLE_SEC)
+                candle_ts[sym] = tick_time - (tick_time % CANDLE_SEC)
+            else:
+                p = buf_ptr[sym]
+                closes[sym][p] = mid
+                if mid > highs[sym][p]: highs[sym][p] = mid
+                if mid < lows[sym][p]: lows[sym][p] = mid
+
+        # 2. Pair Evaluation
+        for asset_a, asset_b in TRADABLE_PAIRS:
+            if buf_count[asset_a] < CANDLE_SEED_MINIMUM or buf_count[asset_b] < CANDLE_SEED_MINIMUM:
+                continue
+
+            # ── ARCHITECT UPGRADE: Precision Timestamp Alignment ──
+            ptr_a, ptr_b = buf_ptr[asset_a], buf_ptr[asset_b]
+            idx_a = np.roll(np.arange(BUFFER_SIZE), -ptr_a - 1)
+            idx_b = np.roll(np.arange(BUFFER_SIZE), -ptr_b - 1)
+
+            # Use only valid history segments
+            start_a = BUFFER_SIZE - buf_count[asset_a]
+            start_b = BUFFER_SIZE - buf_count[asset_b]
+
+            # ── ARCHITECT UPDATE: State-Aware Logic ──
+            # Find if this pair already has an active basket
+            existing_b_id = next((k for k, v in active_baskets.items() 
+                                  if asset_a in v["symbols"] and asset_b in v["symbols"]), None)
+
+            # Action logic initialized
+            action_a, action_b = None, None
+            signal_a, signal_b = 0.0, 0.0
+            exit_reason = ""
+
+            df_a = pd.DataFrame({
+                'time': times[asset_a][idx_a][start_a:],
+                'y':    closes[asset_a][idx_a][start_a:]
+            })
+            df_b = pd.DataFrame({
+                'time': times[asset_b][idx_b][start_b:],
+                'x':    closes[asset_b][idx_b][start_b:]
+            })
+
+            # Merge, ffill, dropna
+            df_merged = pd.merge(df_a, df_b, on='time', how='outer').sort_values('time')
+            df_merged[['y', 'x']] = df_merged[['y', 'x']].ffill()
+            df_merged = df_merged.dropna()
+
+            y = df_merged['y'].values
+            x = df_merged['x'].values
+
+            if len(y) < CANDLE_SEED_MINIMUM: continue
+
+            # Cointegration & Z-Score
+            p_val, beta, z_score, _ = _calculate_spread_stats(y, x, logger)
+            
+            # ── MATH GUARD CHECK: Skip if stats failed ───────────────────
+            if p_val is None:
+                continue
+            
+            # Confidence & Regime
+            confidence = max(0.0, 1.0 - p_val)
+            is_coint = p_val <= COINT_P_LIMIT
+            
+            if is_coint:
+                # ENTRY LOGIC: Only if not already open
+                if not existing_b_id:
+                    if z_score > z_entry_dynamic:
+                        # Short Spread: Sell A, Buy B
+                        action_a, action_b = "ENTER_SHORT", "ENTER_LONG"
+                        signal_a, signal_b = -1.0, 1.0
+                    elif z_score < -z_entry_dynamic:
+                        # Long Spread: Buy A, Sell B
+                        action_a, action_b = "ENTER_LONG", "ENTER_SHORT"
+                        signal_a, signal_b = 1.0, -1.0
+                
+                # EXIT LOGIC: Only if already open
+                if existing_b_id:
+                    # 1. Mean Reversion
+                    if abs(z_score) < z_exit_dynamic: 
+                        action_a, action_b = "CLOSE", "CLOSE"
+                        signal_a, signal_b = 0.0, 0.0
+                        exit_reason = "MEAN_REVERSION"
+                    
+                    # 2. CATASTROPHIC STOP: Z-Score Hard Stop
+                    elif abs(z_score) >= Z_HARD_STOP:
+                        action_a, action_b = "CLOSE", "CLOSE"
+                        signal_a, signal_b = 0.0, 0.0
+                        exit_reason = "Z_HARD_STOP"
+                        logger.warning(
+                            f"WARNING — [Catastrophic Z-Score Stop] {asset_a}/{asset_b} "
+                            f"deviated beyond {Z_HARD_STOP} sigma ({z_score:.2f}). Liquidating."
+                        )
+
+                    # 3. CATASTROPHIC STOP: Time Stop (24 Hours)
+                    else:
+                        now = time.time()
+                        meta = active_baskets[existing_b_id]
+                        age_hours = (now - meta["start_time"]) / 3600.0
+                        if age_hours >= 24.0:
+                            action_a, action_b = "CLOSE", "CLOSE"
+                            signal_a, signal_b = 0.0, 0.0
+                            exit_reason = "TIME_STOP"
+                            logger.warning(
+                                f"WARNING — [Time Stop] Basket {existing_b_id} failed to revert within 24 hours "
+                                f"({age_hours:.1f}h). Liquidating to free margin."
+                            )
+                            # Let the close signal go through, but we'll clean up active_baskets when we emit
+            else:
+                # ── ARCHITECT UPGRADE: Breakdown State Check ──
+                if existing_b_id:
+                    action_a, action_b = "CLOSE", "CLOSE"
+                    signal_a, signal_b = 0.0, 0.0
+                    exit_reason = "COINT_BREAKDOWN"
+                    logger.warning(f"WARNING — [Cointegration Breakdown] {asset_a}/{asset_b} Diverging. Liquidating.")
+
+            if action_a:
+                # Use existing_b_id if it exists (CLOSE), otherwise generate new (ENTER)
+                b_id = existing_b_id if existing_b_id else f"BSKT_{asset_a}_{asset_b}_{int(time.time()/60)}"
+                atr_a = _vectorized_atr(highs[asset_a][idx_a][start_a:], lows[asset_a][idx_a][start_a:], closes[asset_a][idx_a][start_a:])
+                atr_b = _vectorized_atr(highs[asset_b][idx_b][start_b:], lows[asset_b][idx_b][start_b:], closes[asset_b][idx_b][start_b:])
+                
+                # Leg A
+                sig_a = Signal(
+                    symbol=asset_a, signal=signal_a, confidence=confidence, regime="COINTEGRATED" if is_coint else "DIVERGING",
+                    action=action_a, atr=atr_a, z_score=z_score, ofi_ok=True, timestamp=time.time(),
+                    basket_id=b_id, beta=1.0, leg_role="PRIMARY",
+                    hedge_symbol=asset_b, hedge_beta=beta, exit_reason=exit_reason
+                )
+                # Leg B
+                sig_b = Signal(
+                    symbol=asset_b, signal=signal_b, confidence=confidence, regime="COINTEGRATED" if is_coint else "DIVERGING",
+                    action=action_b, atr=atr_b, z_score=z_score, ofi_ok=True, timestamp=time.time(),
+                    basket_id=b_id, beta=beta, leg_role="HEDGE",
+                    hedge_symbol=asset_a, hedge_beta=1.0, exit_reason=exit_reason
+                )
+                
+                try:
+                    signal_queue.put(sig_a, timeout=1.0)
+                    signal_queue.put(sig_b, timeout=1.0)
+                    
+                    # ── ARCHITECT UPDATE: Atomic State Cleanup ──
+                    if action_a == "CLOSE":
+                        active_baskets.pop(existing_b_id, None)
+                    else:
+                        # New Entry
+                        active_baskets[b_id] = {"start_time": time.time(), "symbols": {asset_a, asset_b}}
+
+                    if action_a != "CLOSE":
+                        logger.info(f"[{asset_a}-{asset_b}] Pair Alert: Z={z_score:.2f} | p={p_val:.4f} | Beta={beta:.2f}")
+                except queue.Full:
+                    logger.error(f"Signal queue FULL: basket {b_id} signals {asset_a}/{asset_b} dropped. ExecRouter backlog detected.")
+                except Exception as exc:
+                    logger.error(f"Signal queue error: {exc}")
+
+            # ── Dashboard Signals Pipeline ───────────────────────────────────
+            try:
+                conn = sqlite3.connect("file:logs/trades.db", uri=True, timeout=1.0)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO signals (timestamp, symbol, regime, z_score, beta, confidence)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (time.time(), f"{asset_a}/{asset_b}", "COINT" if is_coint else "DIV", z_score, beta, confidence))
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+
+        # 3. DB Logging & Interval Control
         elapsed = time.perf_counter() - t_start
         if elapsed < EVAL_INTERVAL:
             time.sleep(EVAL_INTERVAL - elapsed)
 
-        for sym in symbols:
-            try:
-                # CANDLE_SEED_MINIMUM guard — don't publish on cold start
-                if buf_count[sym] < CANDLE_SEED_MINIMUM:
-                    continue
-
-                # Unroll circular buffer into contiguous time-ordered view
-                ptr       = buf_ptr[sym]
-                idx_order = np.roll(np.arange(BUFFER_SIZE), -ptr - 1)
-
-                c = closes[sym][idx_order]
-                h = highs[sym][idx_order]
-                l = lows[sym][idx_order]
-
-                # Strip leading zeros from unseeded slots
-                first_real = int(np.argmax(c > 0))
-                if first_real > 0:
-                    c = c[first_real:]
-                    h = h[first_real:]
-                    l = l[first_real:]
-
-                if len(c) < CANDLE_SEED_MINIMUM:
-                    continue
-
-                # ── Dynamic DNA Core Check ────────────────────────────────────
-                current_hurst_req = live_params[0]
-                current_atr_mult  = live_params[1]
-
-                # ── Phase 2: Vectorised mathematics ──────────────────────────
-                hurst  = _vectorized_hurst(c)
-                regime = _regime_from_hurst(hurst, current_hurst_req)
-                
-                # The raw ATR value scaled by the optimizer's multiplier
-                raw_atr = _vectorized_atr(h, l, c)
-                atr     = raw_atr * current_atr_mult if current_atr_mult > 0 else raw_atr
-                
-                zscore = _vectorized_zscore(c)
-
-                # ── Direction logic per regime ────────────────────────────────
-                if regime == "NO_TRADE":
-                    direction = 0.0
-                elif regime == "RANGING":
-                    # Mean reversion: short at extreme high z, long at extreme low z
-                    if zscore > 2.0:
-                        direction = -1.0
-                    elif zscore < -2.0:
-                        direction = 1.0
-                    else:
-                        direction = 0.0
-                else:  # TRENDING
-                    # Momentum: follow the recent directional bias
-                    recent    = c[-ZSCORE_PERIOD:]
-                    direction = 1.0 if recent[-1] > recent[0] else -1.0
-
-                # ── Phase 3: OFI gate ─────────────────────────────────────────
-                ofi_ok = (
-                    _compute_ofi(ofi_deques[sym], direction)
-                    if direction != 0.0 else True
-                )
-
-                sig = Signal(
-                    symbol    = sym,
-                    direction = direction,
-                    atr       = atr,
-                    hurst     = hurst,
-                    regime    = regime,
-                    ofi_ok    = ofi_ok,
-                    timestamp = time.time(),
-                )
-
-                # Publish only actionable, OFI-cleared signals
-                if direction != 0.0 and ofi_ok:
-                    try:
-                        signal_queue.put_nowait(sig)
-                    except Exception:
-                        pass   # queue full — drop; next cycle will retry
-
-            except Exception as exc:
-                logger.warning(f"[{sym}] evaluation error: {exc}")
-
-    logger.info("Stop event received — releasing resources.")
     shm.close()
     mt5.shutdown()
     logger.info("AlphaEngine exited cleanly.")
