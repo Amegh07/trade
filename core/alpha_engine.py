@@ -13,7 +13,7 @@ import multiprocessing as mp
 import numpy as np
 import statsmodels.api as sm
 import pandas as pd
-import statsmodels.tsa.stattools as ts
+from statsmodels.tsa.stattools import coint
 from multiprocessing.shared_memory import SharedMemory
 import datetime
 import collections
