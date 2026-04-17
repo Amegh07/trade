@@ -1,9 +1,22 @@
 import asyncio
 import logging
+import sys
 import MetaTrader5 as mt5
 from config import settings
 from core.alpha_engine import AlphaEngine
 from core.execution_router import ExecutionRouter
+
+# Reconfigure stdout/stderr to UTF-8 so emoji in log messages don't crash the
+# StreamHandler on Windows, which defaults to the cp1252 codepage.
+# errors='replace' ensures any still-unmappable character prints as '?' rather
+# than raising — the FileHandler is already opened with encoding='utf-8'.
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass  # stdout may be None or already locked (e.g. when piped)
 
 logging.basicConfig(
     level=logging.INFO,

@@ -9,7 +9,12 @@ NY_TZ = pytz.timezone("America/New_York")
 class RiskGates:
     def __init__(self):
         self.spread_history = {sym: deque(maxlen=20) for sym in [
-            "AUDUSD", "NZDUSD", "AUDJPY", "NZDJPY"
+            # Original pairs
+            "AUDUSD", "NZDUSD", "AUDJPY", "NZDJPY",
+            # MASTER_PAIRS additions
+            "EURUSD", "GBPUSD",   # London/NY Core
+            "EURJPY", "GBPJPY",   # High Volatility Cross
+            "USDCAD",              # Commodity Cross (AUDUSD already listed above)
         ]}
 
     def is_rollover_window(self) -> bool:

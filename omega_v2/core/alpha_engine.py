@@ -10,9 +10,12 @@ from utils.risk_gates import risk_gates
 
 logger = logging.getLogger("AlphaEngine")
 
-TRADABLE_PAIRS = [
-    ("AUDUSD", "NZDUSD"),   # Oceanic Forex spread
-    ("AUDJPY", "NZDJPY"),   # Asian Session Engine
+MASTER_PAIRS = [
+    ("EURUSD", "GBPUSD"),  # London/NY Core
+    ("AUDUSD", "NZDUSD"),  # Pacific Core
+    ("AUDJPY", "NZDJPY"),  # Asian Core
+    ("EURJPY", "GBPJPY"),  # High Volatility Cross
+    ("USDCAD", "AUDUSD"),  # Commodity Cross
 ]
 
 # SIGNAL_THRESHOLD: 0.1% forecast divergence required to enter.
@@ -87,13 +90,13 @@ class AlphaEngine:
                 continue
 
             cycle += 1
-            logger.info(f"[Cycle {cycle}] Evaluating {len(TRADABLE_PAIRS)} pair(s)...")
+            logger.info(f"[Cycle {cycle}] Evaluating {len(MASTER_PAIRS)} pair(s)...")
 
             # SEQUENTIAL evaluation — MT5's Python binding uses a COM object that is
             # NOT safe for concurrent cross-thread calls. Running pairs with asyncio.gather
             # would submit multiple MT5 calls simultaneously from different thread-pool
             # workers, risking a crash. Sequential evaluation is safe and correct.
-            for asset_a, asset_b in TRADABLE_PAIRS:
+            for asset_a, asset_b in MASTER_PAIRS:
                 await self._process_pair(asset_a, asset_b)
 
             logger.info(f"[Cycle {cycle}] Complete. Sleeping 60s.")
