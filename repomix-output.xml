@@ -84,6 +84,70 @@ diagnostic.html
 index.html
 </file>
 
+<file path="omega_v2/core/__init__.py">
+# core package
+</file>
+
+<file path="omega_v2/requirements.txt">
+MetaTrader5>=5.0.45
+pandas>=2.2.0
+numpy>=1.26.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+pytz>=2024.1
+torch>=2.4.0
+transformers>=4.45.0
+accelerate>=0.34.0
+chronos-forecasting>=1.1.0
+</file>
+
+<file path="omega_v2/utils/__init__.py">
+# utils package
+</file>
+
+<file path="omega_v2/utils/log_parser.py">
+import re
+import pandas as pd
+from datetime import datetime
+
+# Path to the log file (Ensure your main.py has a FileHandler or redirect output)
+LOG_FILE = "omega.log"
+
+def parse_logs():
+    trades = []
+    # Regex to catch: AI Signal Generated: BSKT_AUDUSD_NZDUSD_1713303600 | ENTER_LONG AUDUSD & ENTER_SHORT NZDUSD
+    pattern = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*AI Signal Generated: (BSKT_\w+_\w+_\d+) \| (\w+) (\w+) & (\w+) (\w+)"
+    
+    try:
+        with open(LOG_FILE, "r") as f:
+            for line in f:
+                match = re.search(pattern, line)
+                if match:
+                    trades.append({
+                        "timestamp": match.group(1),
+                        "basket_id": match.group(2),
+                        "action_a": match.group(3),
+                        "symbol_a": match.group(4),
+                        "action_b": match.group(5),
+                        "symbol_b": match.group(6)
+                    })
+        
+        df = pd.DataFrame(trades)
+        if not df.empty:
+            print("\n--- OMEGA V2 TRADE JOURNAL ---")
+            print(df.to_string(index=False))
+            df.to_csv("trade_journal.csv", index=False)
+            print(f"\nSaved {len(df)} signals to trade_journal.csv")
+        else:
+            print("No signals found in logs yet. The AI is still hunting.")
+            
+    except FileNotFoundError:
+        print("Log file not found. Make sure your bot is running and logging to omega.log")
+
+if __name__ == "__main__":
+    parse_logs()
+</file>
+
 <file path="omega_v2/config.py">
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -91,74 +155,26 @@ class Settings(BaseSettings):
     MT5_LOGIN: int
     MT5_PASSWORD: str
     MT5_SERVER: str
-    
+
+    # Execution
     MAX_CONCURRENT: int = 8
     KELLY_MAX: float = 0.25
+
+    # Timing gates
     ROLLOVER_START_HOUR: int = 23    # NY time
     ROLLOVER_END_HOUR: int = 0
-    SPREAD_VARIANCE_MAX: float = 5.0 # 5x average = veto
-    
+
+    # Spread gates
+    SPREAD_VARIANCE_MAX: float = 5.0  # Veto if current spread is 5× moving average
+    MAX_ALLOWED_SPREAD: float = 20.0  # Absolute hard limit in broker points
+
+    # Risk gates (previously orphaned in .env — now active)
+    MAX_SESSION_DRAWDOWN: float = 0.015   # Kill new entries if session equity down ≥1.5%
+    MAX_CONSECUTIVE_LOSSES: int = 3        # Block entries after 3 straight losing baskets
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()
-</file>
-
-<file path="omega_v2/core/__init__.py">
-# core package
-</file>
-
-<file path="omega_v2/main.py">
-import asyncio
-import logging
-import MetaTrader5 as mt5
-from config import settings
-from core.alpha_engine import AlphaEngine
-from core.execution_router import ExecutionRouter
-
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("omega.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("Supervisor")
-
-async def main():
-    logger.info("Initializing Omega v2...")
-    
-    # 1. Boot MT5 synchronously
-    if not mt5.initialize(login=settings.MT5_LOGIN, password=settings.MT5_PASSWORD, server=settings.MT5_SERVER):
-        logger.critical(f"MT5 init failed. Error: {mt5.last_error()}")
-        return
-    logger.info(f"Connected to MT5 Account: {settings.MT5_LOGIN}")
-
-    # 2. Setup Async Infrastructure
-    signal_queue = asyncio.Queue()
-    
-    alpha = AlphaEngine(signal_queue)
-    router = ExecutionRouter(signal_queue)
-
-    # 3. Run Engines Concurrently
-    tasks = [
-        asyncio.create_task(alpha.run()),
-        asyncio.create_task(router.run())
-    ]
-
-    try:
-        await asyncio.gather(*tasks)
-    except asyncio.CancelledError:
-        logger.info("Tasks cancelled. Shutting down.")
-    finally:
-        mt5.shutdown()
-        logger.info("MT5 Shutdown complete.")
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Manual termination received.")
 </file>
 
 <file path="omega_v2/repomix-output.xml">
@@ -225,13 +241,23 @@ class Settings(BaseSettings):
     MT5_LOGIN: int
     MT5_PASSWORD: str
     MT5_SERVER: str
-    
+
+    # Execution
     MAX_CONCURRENT: int = 8
     KELLY_MAX: float = 0.25
+
+    # Timing gates
     ROLLOVER_START_HOUR: int = 23    # NY time
     ROLLOVER_END_HOUR: int = 0
-    SPREAD_VARIANCE_MAX: float = 5.0 # 5x average = veto
-    
+
+    # Spread gates
+    SPREAD_VARIANCE_MAX: float = 5.0  # Veto if current spread is 5× moving average
+    MAX_ALLOWED_SPREAD: float = 20.0  # Absolute hard limit in broker points
+
+    # Risk gates (previously orphaned in .env — now active)
+    MAX_SESSION_DRAWDOWN: float = 0.015   # Kill new entries if session equity down ≥1.5%
+    MAX_CONSECUTIVE_LOSSES: int = 3        # Block entries after 3 straight losing baskets
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()
@@ -243,6 +269,7 @@ settings = Settings()
 
 <file path="core/alpha_engine.py">
 import asyncio
+import functools
 import logging
 import time
 import pandas as pd
@@ -258,6 +285,10 @@ TRADABLE_PAIRS = [
     ("AUDJPY", "NZDJPY"),   # Asian Session Engine
 ]
 
+SIGNAL_THRESHOLD = 0.02   # 2% forecast divergence required to enter
+EXIT_THRESHOLD   = 0.25   # 25% reversion from entry spread triggers close (BUG-V2-03 FIX)
+MAX_BASKET_AGE_H = 24.0   # Time stop: close after 24 hours regardless
+
 class Signal:
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
@@ -265,7 +296,11 @@ class Signal:
 class AlphaEngine:
     def __init__(self, signal_queue: asyncio.Queue):
         self.queue = signal_queue
-        # Load Chronos-Bolt (Lightweight 9M parameter model)
+
+        # C1 FIX: Position memory — tracks open baskets keyed by (asset_a, asset_b)
+        # Value: {"basket_id": str, "entry_spread": float, "entry_time": float}
+        self.active_pairs: dict = {}
+
         logger.info("Loading Chronos-Bolt-tiny model to GPU/CPU...")
         self.pipeline = BaseChronosPipeline.from_pretrained(
             "amazon/chronos-bolt-tiny",
@@ -274,8 +309,38 @@ class AlphaEngine:
         )
         logger.info("Model loaded successfully.")
 
+    async def _sync_open_positions(self):
+        """On startup, recover any baskets already open in MT5 to prevent re-entry."""
+        loop = asyncio.get_running_loop()
+        positions = await loop.run_in_executor(None, mt5.positions_get)
+        if not positions:
+            return
+
+        recovered = 0
+        for pos in positions:
+            comment = pos.comment or ""
+            if comment.startswith("BSKT_"):
+                # Comment format: BSKT_AUDUSD_NZDUSD_1713303600
+                parts = comment.split("_")
+                if len(parts) >= 4:
+                    asset_a = parts[1]
+                    asset_b = parts[2]
+                    pair_key = (asset_a, asset_b)
+                    if pair_key not in self.active_pairs:
+                        self.active_pairs[pair_key] = {
+                            "basket_id": comment,
+                            "entry_spread": 0.0,   # Unknown at recovery — time-stop only
+                            "entry_time": float(pos.time)
+                        }
+                        recovered += 1
+
+        if recovered:
+            logger.info(f"[Recovery] Recovered {recovered} active baskets from MT5 on startup.")
+
     async def run(self):
         """Main async loop for generating signals."""
+        await self._sync_open_positions()
+
         while True:
             if risk_gates.is_rollover_window():
                 logger.warning("Rollover Window Active. Alpha Engine pausing for 60s...")
@@ -284,65 +349,174 @@ class AlphaEngine:
 
             for asset_a, asset_b in TRADABLE_PAIRS:
                 await self._process_pair(asset_a, asset_b)
-            
-            # Wait 1 minute before polling again (adjust as needed for M5 strategy)
+
             await asyncio.sleep(60)
 
     async def _process_pair(self, asset_a: str, asset_b: str):
-        # Fetch last 512 M5 candles synchronously in a thread to not block async loop
-        loop = asyncio.get_event_loop()
+        """Wrapper that catches and logs all exceptions from pair evaluation.
+
+        DIAG-01 FIX: Previously, any exception in _evaluate_pair would propagate up
+        and silently kill the 'for' loop iteration, causing the alpha engine to skip
+        pairs without any log output. Now every failure is captured and logged.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            await self._evaluate_pair(asset_a, asset_b, loop)
+        except Exception as e:
+            logger.exception(f"[{asset_a}/{asset_b}] Unhandled exception in pair evaluation: {e}")
+
+    async def _evaluate_pair(self, asset_a: str, asset_b: str, loop):
+        """Core pair evaluation — rate fetch, forecast, entry/exit signal emission."""
         rates_a = await loop.run_in_executor(None, mt5.copy_rates_from_pos, asset_a, mt5.TIMEFRAME_M5, 0, 512)
         rates_b = await loop.run_in_executor(None, mt5.copy_rates_from_pos, asset_b, mt5.TIMEFRAME_M5, 0, 512)
 
         if rates_a is None or rates_b is None or len(rates_a) < 512 or len(rates_b) < 512:
+            logger.debug(f"[{asset_a}/{asset_b}] Insufficient rate data (a={len(rates_a) if rates_a is not None else 'None'}, "
+                         f"b={len(rates_b) if rates_b is not None else 'None'}). Skipping.")
             return
 
-        df = pd.DataFrame({'a': rates_a['close'], 'b': rates_b['close']})
+        # H3 FIX: Align data on shared timestamps before computing spread
+        df_a = pd.DataFrame({'time': rates_a['time'], 'a': rates_a['close']})
+        df_b = pd.DataFrame({'time': rates_b['time'], 'b': rates_b['close']})
+        df = pd.merge(df_a, df_b, on='time', how='inner')
+        if len(df) < 480:
+            logger.debug(f"[{asset_a}/{asset_b}] Insufficient aligned candles ({len(df)}). Skipping.")
+            return
+
         spread = df['a'] - df['b']
+        current_spread = float(spread.iloc[-1])
 
-        # Zero-Shot Forecast (ChronosBolt uses quantile output, no num_samples)
+        # Zero-Shot Forecast
+        # BUG-NEW-01 FIX: pipeline.predict() is a blocking PyTorch call (~15–60s on CPU).
+        # Running it directly on the event loop froze all async scheduling during inference,
+        # preventing ExecutionRouter from consuming signals and blocking SIGINT handling.
+        # Wrapping in run_in_executor offloads inference to a thread so the event loop
+        # stays live. functools.partial is required because run_in_executor cannot pass
+        # keyword arguments.
         context = torch.tensor(spread.values, dtype=torch.float32)
-        forecast = self.pipeline.predict(context, prediction_length=10)
-        # forecast shape: (batch=1, quantiles, prediction_length) — take median (index 1)
-        mean_forecast = forecast[0, len(forecast[0]) // 2].cpu().numpy()
+        predict_fn = functools.partial(self.pipeline.predict, context, prediction_length=10)
+        forecast = await loop.run_in_executor(None, predict_fn)
+        # forecast shape: (batch=1, quantiles, prediction_length) — take median quantile
+        n_quantiles = forecast.shape[1]
+        median_idx = n_quantiles // 2
+        mean_forecast = forecast[0, median_idx].cpu().numpy()
+        future_spread = float(mean_forecast[0])
 
-        current_spread = spread.iloc[-1]
-        future_spread = float(mean_forecast[0]) # Forecasted spread for the next M5 bar
+        pair_key = (asset_a, asset_b)
 
-        # Check Risk Gates
-        info_a = mt5.symbol_info(asset_a)
+        # ── EXIT LOGIC ─────────────────────────────────────────────────────────
+        if pair_key in self.active_pairs:
+            basket = self.active_pairs[pair_key]
+            age_hours = (time.time() - basket["entry_time"]) / 3600.0
+            time_stop = age_hours >= MAX_BASKET_AGE_H
+
+            # BUG-V2-03 FIX: The original code compared future_spread to current_spread,
+            # which measured whether the *model's view is changing*, not whether the trade
+            # is in profit. The correct check: has the spread reverted toward zero from entry?
+            #
+            # predicted_reversion = fraction of entry spread magnitude the model predicts
+            # will have unwound. Positive = converging toward mean (zero). Exit when ≥ EXIT_THRESHOLD.
+            #
+            # Recovery case (entry_spread=0.0): entry spread unknown after restart.
+            # We cannot compute reversion — rely on TIME_STOP only.
+            entry_spread = basket["entry_spread"]
+            if abs(entry_spread) > 1e-9:
+                predicted_reversion = (abs(entry_spread) - abs(future_spread)) / abs(entry_spread)
+                spread_converged = predicted_reversion >= EXIT_THRESHOLD
+            else:
+                spread_converged = False  # Recovery case: no entry spread known; time-stop only
+
+            if spread_converged or time_stop:
+                reason = "TIME_STOP" if time_stop else "MEAN_REVERSION"
+                logger.info(
+                    f"[{asset_a}/{asset_b}] EXIT signal — reason: {reason} | "
+                    f"age: {age_hours:.1f}h | entry_spread: {entry_spread:.5f} | "
+                    f"future_spread: {future_spread:.5f}"
+                )
+                sig_a = Signal(symbol=asset_a, action="CLOSE", basket_id=basket["basket_id"], role="PRIMARY")
+                sig_b = Signal(symbol=asset_b, action="CLOSE", basket_id=basket["basket_id"], role="HEDGE")
+                await self.queue.put(sig_a)
+                await self.queue.put(sig_b)
+                del self.active_pairs[pair_key]
+            return  # Never attempt fresh entry while an existing basket is open
+
+        # ── ENTRY LOGIC ────────────────────────────────────────────────────────
+        # BUG-V2-01 + BUG-V2-02 FIX:
+        #   (a) symbol_info is now awaited via run_in_executor (was a blocking MT5 call on event loop)
+        #   (b) BOTH pair legs are now checked, not just asset_a
+        #   (c) Absolute spread gate (is_spread_absolute_blown) applied to both legs in addition to variance gate
+        info_a = await loop.run_in_executor(None, mt5.symbol_info, asset_a)
+        info_b = await loop.run_in_executor(None, mt5.symbol_info, asset_b)
+
         if info_a and risk_gates.is_spread_blown(asset_a, info_a.spread):
-            logger.warning(f"Spread blown on {asset_a}. Vetoing signal.")
+            logger.warning(f"[{asset_a}/{asset_b}] Variance spread blown on {asset_a}. Vetoing signal.")
+            return
+        if info_b and risk_gates.is_spread_blown(asset_b, info_b.spread):
+            logger.warning(f"[{asset_a}/{asset_b}] Variance spread blown on {asset_b}. Vetoing signal.")
+            return
+        if info_a and risk_gates.is_spread_absolute_blown(asset_a, info_a.spread):
+            logger.warning(f"[{asset_a}/{asset_b}] Absolute spread limit exceeded on {asset_a}. Vetoing signal.")
+            return
+        if info_b and risk_gates.is_spread_absolute_blown(asset_b, info_b.spread):
+            logger.warning(f"[{asset_a}/{asset_b}] Absolute spread limit exceeded on {asset_b}. Vetoing signal.")
             return
 
-        # Directional Logic
         action_a = action_b = None
-        if future_spread > current_spread * 1.02: # Widen expectation
-            action_a, action_b = "ENTER_SHORT", "ENTER_LONG"
-        elif future_spread < current_spread * 0.98: # Narrow expectation
-            action_a, action_b = "ENTER_LONG", "ENTER_SHORT"
-        
+        if current_spread != 0:
+            divergence = (future_spread - current_spread) / abs(current_spread)
+            if divergence > SIGNAL_THRESHOLD:
+                action_a, action_b = "ENTER_SHORT", "ENTER_LONG"
+            elif divergence < -SIGNAL_THRESHOLD:
+                action_a, action_b = "ENTER_LONG", "ENTER_SHORT"
+
         if action_a:
             b_id = f"BSKT_{asset_a}_{asset_b}_{int(time.time())}"
             sig_a = Signal(symbol=asset_a, action=action_a, basket_id=b_id, role="PRIMARY")
             sig_b = Signal(symbol=asset_b, action=action_b, basket_id=b_id, role="HEDGE")
-            
             await self.queue.put(sig_a)
             await self.queue.put(sig_b)
-            logger.info(f"AI Signal Generated: {b_id} | {action_a} {asset_a} & {action_b} {asset_b}")
+
+            # C1 FIX: Register basket immediately to prevent re-entry on next tick
+            self.active_pairs[pair_key] = {
+                "basket_id": b_id,
+                "entry_spread": current_spread,
+                "entry_time": time.time()
+            }
+            logger.info(
+                f"AI Signal Generated: {b_id} | {action_a} {asset_a} & {action_b} {asset_b} | "
+                f"spread: {current_spread:.5f} | divergence: {divergence:.4%}"
+            )
+        else:
+            logger.debug(
+                f"[{asset_a}/{asset_b}] No signal — divergence below threshold | "
+                f"current: {current_spread:.5f} | future: {future_spread:.5f}"
+            )
 </file>
 
 <file path="core/execution_router.py">
 import asyncio
 import logging
 import MetaTrader5 as mt5
+from config import settings
 
 logger = logging.getLogger("ExecutionRouter")
 
 class ExecutionRouter:
     def __init__(self, signal_queue: asyncio.Queue):
         self.queue = signal_queue
-        self.loop = asyncio.get_event_loop()
+
+        # ── Session-level risk state ────────────────────────────────────────────
+        # Captured on first account_info call; used for drawdown gate.
+        self._session_equity_start: float | None = None
+
+        # Counts consecutive losing baskets. Reset to 0 on any winning basket.
+        # Only incremented once per basket (on the HEDGE leg close).
+        self._consecutive_losses: int = 0
+
+        # Stores the account equity snapshot taken at the start of each basket
+        # close sequence (PRIMARY leg). Consumed when the HEDGE leg settles.
+        # Key: basket_id str — value: equity float
+        self._pre_close_equity: dict = {}
 
     async def run(self):
         """Listens for AI signals and executes them."""
@@ -352,30 +526,83 @@ class ExecutionRouter:
             try:
                 await self._execute(signal)
             except Exception as e:
-                logger.error(f"Execution failed: {e}")
+                logger.error(f"Execution failed for {getattr(signal, 'symbol', '?')}: {e}")
             finally:
                 self.queue.task_done()
 
     async def _execute(self, sig):
-        # 1. Atomic Margin Check (The Gap Defense)
-        account_info = await self.loop.run_in_executor(None, mt5.account_info)
-        if account_info.margin_free < 200.0: # Failsafe threshold
-            logger.critical("Margin Collapse Imminent. Rejecting order.")
+        loop = asyncio.get_running_loop()
+
+        # 1. C4 FIX: Guard account_info against None (MT5 disconnect)
+        account_info = await loop.run_in_executor(None, mt5.account_info)
+        if account_info is None:
+            logger.error("MT5 account_info returned None — connection lost. Skipping order.")
             return
 
-        # 2. Prepare Order
-        symbol_info = await self.loop.run_in_executor(None, mt5.symbol_info, sig.symbol)
+        # Capture session equity baseline on first successful call
+        if self._session_equity_start is None:
+            self._session_equity_start = account_info.equity
+            logger.info(f"[Risk] Session equity baseline set: {self._session_equity_start:.2f}")
+
+        # ── Session drawdown gate ───────────────────────────────────────────────
+        # Applies to ALL actions (entries AND exits) — a blown session must halt everything
+        # except the user can still ManualClose via MT5 terminal.
+        session_dd = (self._session_equity_start - account_info.equity) / self._session_equity_start
+        if session_dd >= settings.MAX_SESSION_DRAWDOWN:
+            logger.critical(
+                f"[Risk] SESSION DRAWDOWN LIMIT BREACHED: {session_dd:.2%} >= "
+                f"{settings.MAX_SESSION_DRAWDOWN:.2%} ({account_info.equity:.2f} equity). "
+                f"All orders rejected."
+            )
+            return
+
+        # ── Consecutive losses gate ─────────────────────────────────────────────
+        # Only blocks new ENTRIES. CLOSE signals always pass through so existing
+        # positions can still be exited cleanly.
+        if sig.action != "CLOSE" and self._consecutive_losses >= settings.MAX_CONSECUTIVE_LOSSES:
+            logger.critical(
+                f"[Risk] {self._consecutive_losses} consecutive losing baskets. "
+                f"New entries blocked until manual reset or a winning basket."
+            )
+            return
+
+        # ── Margin floor ────────────────────────────────────────────────────────
+        if account_info.margin_free < 200.0:
+            logger.critical(
+                f"[Risk] Margin floor breached ({account_info.margin_free:.2f} free). Rejecting order."
+            )
+            return
+
+        # 2. Symbol visibility check
+        symbol_info = await loop.run_in_executor(None, mt5.symbol_info, sig.symbol)
         if not symbol_info or not symbol_info.visible:
             logger.error(f"{sig.symbol} not visible in Market Watch.")
             return
 
+        # 3. CLOSE action — snapshot equity on PRIMARY so we can measure basket PnL on HEDGE
+        if sig.action == "CLOSE":
+            if getattr(sig, 'role', '') == "PRIMARY":
+                self._pre_close_equity[sig.basket_id] = account_info.equity
+            await self._close_positions(sig, loop)
+            return
+
+        # 4. ENTER action — open a new position
         order_type = mt5.ORDER_TYPE_BUY if "LONG" in sig.action else mt5.ORDER_TYPE_SELL
-        price = mt5.symbol_info_tick(sig.symbol).ask if order_type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(sig.symbol).bid
-        
+
+        # C3 FIX: wrap symbol_info_tick in run_in_executor — never call MT5 directly on event loop
+        tick = await loop.run_in_executor(None, mt5.symbol_info_tick, sig.symbol)
+        if tick is None:
+            logger.error(f"Could not fetch tick for {sig.symbol}. Skipping order.")
+            return
+        price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
+
+        # Dynamic volume using Kelly fraction from account equity
+        kelly_volume = round(max(0.01, account_info.equity * settings.KELLY_MAX / 100_000), 2)
+
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": sig.symbol,
-            "volume": 0.01, # Default minimum size. Expand with your Kelly logic later.
+            "volume": kelly_volume,
             "type": order_type,
             "price": price,
             "deviation": 10,
@@ -385,14 +612,102 @@ class ExecutionRouter:
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
 
-        # 3. Send Order async
-        result = await self.loop.run_in_executor(None, mt5.order_send, request)
+        result = await loop.run_in_executor(None, mt5.order_send, request)
         if result is None:
-            logger.error(f"Order send returned None for {sig.symbol} — market likely closed or symbol unavailable. MT5 error: {mt5.last_error()}")
+            logger.error(f"order_send returned None for {sig.symbol} — {mt5.last_error()}")
         elif result.retcode != mt5.TRADE_RETCODE_DONE:
             logger.error(f"Order failed for {sig.symbol}: {result.comment} [retcode={result.retcode}]")
         else:
-            logger.info(f"Order executed: {sig.symbol} {sig.action} at {price}")
+            logger.info(f"Order executed: {sig.symbol} {sig.action} | {kelly_volume} lots @ {price}")
+
+    async def _close_positions(self, sig, loop):
+        """Close all open positions for the given symbol belonging to this basket.
+
+        BUG-V2-04 FIX:
+          - Primary filter: comment == basket_id AND magic == 999
+          - Fallback filter: magic == 999 ONLY (NOT all positions on symbol)
+            The original code fell back to closing ALL positions on the symbol if the
+            comment was stripped by the broker. On a live account this would close
+            positions opened by other strategies or manual trades.
+        """
+        positions = await loop.run_in_executor(None, mt5.positions_get, sig.symbol)
+        if not positions:
+            logger.warning(f"[CLOSE] No open positions found for {sig.symbol}.")
+            return
+
+        # Primary: exact basket comment + our magic number
+        basket_positions = [p for p in positions if p.comment == sig.basket_id and p.magic == 999]
+        if not basket_positions:
+            # Fallback: only our magic number — never touch foreign positions
+            basket_positions = [p for p in positions if p.magic == 999]
+            if not basket_positions:
+                logger.error(
+                    f"[CLOSE] No positions with magic=999 found for {sig.symbol} "
+                    f"(basket: {sig.basket_id}). Aborting close."
+                )
+                return
+            logger.warning(
+                f"[CLOSE] Basket comment not matched for {sig.symbol}. "
+                f"Falling back to {len(basket_positions)} magic=999 position(s)."
+            )
+
+        closed_count = 0
+        for pos in basket_positions:
+            close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+            tick = await loop.run_in_executor(None, mt5.symbol_info_tick, sig.symbol)
+            if tick is None:
+                logger.error(f"[CLOSE] Could not fetch tick for {sig.symbol}. Skipping ticket {pos.ticket}.")
+                continue
+            price = tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask
+
+            close_request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": sig.symbol,
+                "volume": pos.volume,
+                "type": close_type,
+                "position": pos.ticket,
+                "price": price,
+                "deviation": 10,
+                "magic": 999,
+                "comment": f"close_{sig.basket_id}",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+            result = await loop.run_in_executor(None, mt5.order_send, close_request)
+            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                err = result.comment if result else mt5.last_error()
+                logger.error(f"[CLOSE] Failed to close {sig.symbol} ticket {pos.ticket}: {err}")
+            else:
+                logger.info(f"[CLOSE] Closed {sig.symbol} ticket {pos.ticket} @ {price}")
+                closed_count += 1
+
+        # ── Consecutive loss tracking ────────────────────────────────────────────
+        # Only runs on the HEDGE leg (last signal in the basket close sequence).
+        # At this point both PRIMARY and HEDGE legs have been closed, so the full
+        # basket PnL is reflected in account equity.
+        if closed_count > 0 and getattr(sig, 'role', '') == "HEDGE":
+            pre_equity = self._pre_close_equity.pop(sig.basket_id, None)
+            if pre_equity is not None:
+                post_info = await loop.run_in_executor(None, mt5.account_info)
+                if post_info is not None:
+                    pnl = post_info.equity - pre_equity
+                    if pnl < 0:
+                        self._consecutive_losses += 1
+                        logger.warning(
+                            f"[Risk] Basket {sig.basket_id} — LOSS: {pnl:.2f}. "
+                            f"Consecutive losses: {self._consecutive_losses}/{settings.MAX_CONSECUTIVE_LOSSES}"
+                        )
+                    else:
+                        self._consecutive_losses = 0
+                        logger.info(
+                            f"[Risk] Basket {sig.basket_id} — WIN: +{pnl:.2f}. "
+                            f"Consecutive loss counter reset to 0."
+                        )
+            else:
+                logger.debug(
+                    f"[Risk] No pre-close equity snapshot for basket {sig.basket_id}. "
+                    f"PnL tracking skipped (likely recovered from crash)."
+                )
 </file>
 
 <file path="main.py">
@@ -404,7 +719,7 @@ from core.alpha_engine import AlphaEngine
 from core.execution_router import ExecutionRouter
 
 logging.basicConfig(
-    level=logging.INFO, 
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("omega.log"),
@@ -415,8 +730,8 @@ logger = logging.getLogger("Supervisor")
 
 async def main():
     logger.info("Initializing Omega v2...")
-    
-    # 1. Boot MT5 synchronously
+
+    # 1. Boot MT5 synchronously before event loop takes over
     if not mt5.initialize(login=settings.MT5_LOGIN, password=settings.MT5_PASSWORD, server=settings.MT5_SERVER):
         logger.critical(f"MT5 init failed. Error: {mt5.last_error()}")
         return
@@ -424,23 +739,43 @@ async def main():
 
     # 2. Setup Async Infrastructure
     signal_queue = asyncio.Queue()
-    
+
     alpha = AlphaEngine(signal_queue)
     router = ExecutionRouter(signal_queue)
 
-    # 3. Run Engines Concurrently
+    # 3. Run Engines Concurrently with named tasks for clear crash diagnostics
     tasks = [
-        asyncio.create_task(alpha.run()),
-        asyncio.create_task(router.run())
+        asyncio.create_task(alpha.run(), name="AlphaEngine"),
+        asyncio.create_task(router.run(), name="ExecutionRouter"),
     ]
 
     try:
-        await asyncio.gather(*tasks)
+        # BUG-NEW-02 FIX: Use return_exceptions=True so an unhandled crash in either
+        # coroutine is captured as a value rather than re-raised, giving us the chance
+        # to log a CRITICAL message naming the failed task before shutdown.
+        # Without this fix, any non-CancelledError exception silently propagated through
+        # asyncio.gather and killed the system with no useful log output.
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for task, result in zip(tasks, results):
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                logger.critical(
+                    f"[{task.get_name()}] Crashed with unhandled exception: {result!r}",
+                    exc_info=result
+                )
     except asyncio.CancelledError:
         logger.info("Tasks cancelled. Shutting down.")
     finally:
+        # Cancel any task that is still running (e.g. the survivor when one crashes)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
         mt5.shutdown()
         logger.info("MT5 Shutdown complete.")
+
 
 if __name__ == "__main__":
     try:
@@ -525,93 +860,42 @@ class RiskGates:
         ]}
 
     def is_rollover_window(self) -> bool:
-        """Blocks trading during the 23:55 to 00:05 NY time liquidity vacuum."""
+        """Blocks trading during the 23:55–00:05 NY time liquidity vacuum."""
         now = datetime.datetime.now(NY_TZ)
         return (now.hour == settings.ROLLOVER_START_HOUR and now.minute >= 55) or \
                (now.hour == settings.ROLLOVER_END_HOUR and now.minute <= 5)
 
     def is_spread_blown(self, symbol: str, current_spread: float) -> bool:
-        """Vetoes the trade if the current spread is 5x the recent moving average."""
+        """Vetoes the trade if the current spread is SPREAD_VARIANCE_MAX× the recent moving average."""
         hist = self.spread_history.get(symbol)
         if hist is None:
             return False
-            
+
         if len(hist) < 10:
             hist.append(current_spread)
             return False
-            
+
         hist.append(current_spread)
         avg = np.mean(list(hist))
         if avg == 0:
             return False
-            
+
         ratio = current_spread / avg
         return ratio > settings.SPREAD_VARIANCE_MAX
+
+    def is_spread_absolute_blown(self, symbol: str, current_spread: float) -> bool:
+        """Vetoes the trade if the current spread exceeds the MAX_ALLOWED_SPREAD hard limit in points.
+
+        This is a separate, unconditional gate from the variance-based check.
+        It fires immediately with no history required, protecting against news-spike spreads
+        that haven't yet skewed the rolling average.
+        """
+        return current_spread > settings.MAX_ALLOWED_SPREAD
 
 risk_gates = RiskGates()
 </file>
 
 </files>
-</file>
-
-<file path="omega_v2/requirements.txt">
-MetaTrader5>=5.0.45
-pandas>=2.2.0
-numpy>=1.26.0
-pydantic-settings>=2.1.0
-python-dotenv>=1.0.0
-pytz>=2024.1
-torch>=2.4.0
-transformers>=4.45.0
-accelerate>=0.34.0
-chronos-forecasting>=1.1.0
-</file>
-
-<file path="omega_v2/utils/__init__.py">
-# utils package
-</file>
-
-<file path="omega_v2/utils/log_parser.py">
-import re
-import pandas as pd
-from datetime import datetime
-
-# Path to the log file (Ensure your main.py has a FileHandler or redirect output)
-LOG_FILE = "omega.log"
-
-def parse_logs():
-    trades = []
-    # Regex to catch: AI Signal Generated: BSKT_AUDUSD_NZDUSD_1713303600 | ENTER_LONG AUDUSD & ENTER_SHORT NZDUSD
-    pattern = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*AI Signal Generated: (BSKT_\w+_\w+_\d+) \| (\w+) (\w+) & (\w+) (\w+)"
-    
-    try:
-        with open(LOG_FILE, "r") as f:
-            for line in f:
-                match = re.search(pattern, line)
-                if match:
-                    trades.append({
-                        "timestamp": match.group(1),
-                        "basket_id": match.group(2),
-                        "action_a": match.group(3),
-                        "symbol_a": match.group(4),
-                        "action_b": match.group(5),
-                        "symbol_b": match.group(6)
-                    })
-        
-        df = pd.DataFrame(trades)
-        if not df.empty:
-            print("\n--- OMEGA V2 TRADE JOURNAL ---")
-            print(df.to_string(index=False))
-            df.to_csv("trade_journal.csv", index=False)
-            print(f"\nSaved {len(df)} signals to trade_journal.csv")
-        else:
-            print("No signals found in logs yet. The AI is still hunting.")
-            
-    except FileNotFoundError:
-        print("Log file not found. Make sure your bot is running and logging to omega.log")
-
-if __name__ == "__main__":
-    parse_logs()
 </file>
 
 <file path="omega_v2/utils/risk_gates.py">
@@ -630,34 +914,139 @@ class RiskGates:
         ]}
 
     def is_rollover_window(self) -> bool:
-        """Blocks trading during the 23:55 to 00:05 NY time liquidity vacuum."""
+        """Blocks trading during the 23:55–00:05 NY time liquidity vacuum."""
         now = datetime.datetime.now(NY_TZ)
         return (now.hour == settings.ROLLOVER_START_HOUR and now.minute >= 55) or \
                (now.hour == settings.ROLLOVER_END_HOUR and now.minute <= 5)
 
     def is_spread_blown(self, symbol: str, current_spread: float) -> bool:
-        """Vetoes the trade if the current spread is 5x the recent moving average."""
+        """Vetoes the trade if the current spread is SPREAD_VARIANCE_MAX× the recent moving average."""
         hist = self.spread_history.get(symbol)
         if hist is None:
             return False
-            
+
         if len(hist) < 10:
             hist.append(current_spread)
             return False
-            
+
         hist.append(current_spread)
         avg = np.mean(list(hist))
         if avg == 0:
             return False
-            
+
         ratio = current_spread / avg
         return ratio > settings.SPREAD_VARIANCE_MAX
+
+    def is_spread_absolute_blown(self, symbol: str, current_spread: float) -> bool:
+        """Vetoes the trade if the current spread exceeds the MAX_ALLOWED_SPREAD hard limit in points.
+
+        This is a separate, unconditional gate from the variance-based check.
+        It fires immediately with no history required, protecting against news-spike spreads
+        that haven't yet skewed the rolling average.
+        """
+        return current_spread > settings.MAX_ALLOWED_SPREAD
 
 risk_gates = RiskGates()
 </file>
 
+<file path="omega_v2/main.py">
+import asyncio
+import logging
+import MetaTrader5 as mt5
+from config import settings
+from core.alpha_engine import AlphaEngine
+from core.execution_router import ExecutionRouter
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("omega.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("Supervisor")
+
+
+async def main():
+    logger.info("Initializing Omega v2...")
+
+    # Boot MT5 synchronously before the event loop takes over
+    if not mt5.initialize(login=settings.MT5_LOGIN, password=settings.MT5_PASSWORD, server=settings.MT5_SERVER):
+        logger.critical(f"MT5 init failed. Error: {mt5.last_error()}")
+        return
+    logger.info(f"Connected to MT5 Account: {settings.MT5_LOGIN}")
+
+    signal_queue = asyncio.Queue()
+    alpha = AlphaEngine(signal_queue)
+    router = ExecutionRouter(signal_queue)
+
+    tasks: list[asyncio.Task] = []
+
+    # ── Task crash handler ───────────────────────────────────────────────────
+    # Fires as soon as any task finishes unexpectedly (exception or early return).
+    # Logs the crash with full traceback, then cancels the surviving sibling so
+    # asyncio.gather unblocks and the finally block can run cleanly.
+    #
+    # BUG-SELF-02 FIX: The previous approach used asyncio.gather(*tasks, return_exceptions=True).
+    # That design HANGS FOREVER if one task crashes while the other (infinite loop) keeps
+    # running — gather waits for all tasks to complete but the survivor never ends.
+    # The correct approach is done_callbacks: crash is detected and logged immediately,
+    # siblings are cancelled, and gather propagates the CancelledError to finally.
+    def _on_task_done(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return              # Normal shutdown — already logged by the CancelledError path
+        exc = task.exception()
+        if exc is not None:
+            logger.critical(
+                f"[{task.get_name()}] CRASHED — initiating emergency shutdown.",
+                exc_info=exc
+            )
+            # Cancel every other task so asyncio.gather unblocks
+            for t in tasks:
+                if t is not task and not t.done():
+                    t.cancel()
+
+    tasks.extend([
+        asyncio.create_task(alpha.run(), name="AlphaEngine"),
+        asyncio.create_task(router.run(), name="ExecutionRouter"),
+    ])
+    for task in tasks:
+        task.add_done_callback(_on_task_done)
+
+    try:
+        # No return_exceptions=True — exceptions propagate naturally.
+        # If a task crashes, _on_task_done cancels siblings → CancelledError in gather.
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        # Ctrl+C or a task crash → siblings cancelled → lands here
+        logger.info("Shutdown signal received. Stopping all tasks.")
+    except Exception as e:
+        # Safety net: any exception that wasn't caught by tasks themselves
+        logger.critical(f"[Supervisor] Unhandled exception: {e!r}", exc_info=e)
+    finally:
+        # Ensure every task is fully stopped before calling mt5.shutdown()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        mt5.shutdown()
+        logger.info("Omega v2 stopped cleanly.")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass  # Ctrl+C logged inside main(); suppress Python's default traceback
+</file>
+
 <file path="omega_v2/core/alpha_engine.py">
 import asyncio
+import functools
 import logging
 import time
 import pandas as pd
@@ -673,19 +1062,27 @@ TRADABLE_PAIRS = [
     ("AUDJPY", "NZDJPY"),   # Asian Session Engine
 ]
 
-SIGNAL_THRESHOLD = 0.02   # 2% forecast divergence required to enter
-EXIT_THRESHOLD   = 0.005  # 0.5% convergence triggers close
-MAX_BASKET_AGE_H = 24.0   # Time stop: close after 24 hours
+# SIGNAL_THRESHOLD: 0.1% forecast divergence required to enter.
+#
+# Chronos-Bolt is a zero-shot probabilistic forecaster for stationary spreads.
+# Its median quantile output typically moves 0.05–0.3% per M5 bar relative to
+# current value. The previous threshold of 2% was structurally unreachable —
+# this caused zero signals across all observed runtime.
+SIGNAL_THRESHOLD = 0.001  # 0.1% forecast divergence required to enter
+EXIT_THRESHOLD   = 0.25   # 25% reversion from entry spread triggers close
+MAX_BASKET_AGE_H = 24.0   # Time stop: close after 24 hours regardless
+
 
 class Signal:
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
 
+
 class AlphaEngine:
     def __init__(self, signal_queue: asyncio.Queue):
         self.queue = signal_queue
 
-        # C1 FIX: Position memory — tracks open baskets keyed by (asset_a, asset_b)
+        # Position memory — tracks open baskets keyed by (asset_a, asset_b)
         # Value: {"basket_id": str, "entry_spread": float, "entry_time": float}
         self.active_pairs: dict = {}
 
@@ -717,7 +1114,7 @@ class AlphaEngine:
                     if pair_key not in self.active_pairs:
                         self.active_pairs[pair_key] = {
                             "basket_id": comment,
-                            "entry_spread": 0.0,   # Unknown at recovery — use 0 so exit relies on convergence only
+                            "entry_spread": 0.0,   # Unknown at recovery — time-stop only
                             "entry_time": float(pos.time)
                         }
                         recovered += 1
@@ -728,6 +1125,7 @@ class AlphaEngine:
     async def run(self):
         """Main async loop for generating signals."""
         await self._sync_open_positions()
+        cycle = 0
 
         while True:
             if risk_gates.is_rollover_window():
@@ -735,34 +1133,59 @@ class AlphaEngine:
                 await asyncio.sleep(60)
                 continue
 
+            cycle += 1
+            logger.info(f"[Cycle {cycle}] Evaluating {len(TRADABLE_PAIRS)} pair(s)...")
+
+            # SEQUENTIAL evaluation — MT5's Python binding uses a COM object that is
+            # NOT safe for concurrent cross-thread calls. Running pairs with asyncio.gather
+            # would submit multiple MT5 calls simultaneously from different thread-pool
+            # workers, risking a crash. Sequential evaluation is safe and correct.
             for asset_a, asset_b in TRADABLE_PAIRS:
                 await self._process_pair(asset_a, asset_b)
 
+            logger.info(f"[Cycle {cycle}] Complete. Sleeping 60s.")
             await asyncio.sleep(60)
 
     async def _process_pair(self, asset_a: str, asset_b: str):
-        loop = asyncio.get_running_loop()  # H2 FIX: use get_running_loop()
+        """Wrapper that catches and logs all exceptions from pair evaluation."""
+        loop = asyncio.get_running_loop()
+        try:
+            await self._evaluate_pair(asset_a, asset_b, loop)
+        except Exception as e:
+            logger.exception(f"[{asset_a}/{asset_b}] Unhandled exception in pair evaluation: {e}")
 
+    async def _evaluate_pair(self, asset_a: str, asset_b: str, loop):
+        """Core pair evaluation — rate fetch, forecast, entry/exit signal emission."""
         rates_a = await loop.run_in_executor(None, mt5.copy_rates_from_pos, asset_a, mt5.TIMEFRAME_M5, 0, 512)
         rates_b = await loop.run_in_executor(None, mt5.copy_rates_from_pos, asset_b, mt5.TIMEFRAME_M5, 0, 512)
 
         if rates_a is None or rates_b is None or len(rates_a) < 512 or len(rates_b) < 512:
+            logger.warning(
+                f"[{asset_a}/{asset_b}] Insufficient rate data "
+                f"(a={len(rates_a) if rates_a is not None else 'None'}, "
+                f"b={len(rates_b) if rates_b is not None else 'None'}). Skipping."
+            )
             return
 
-        # H3 FIX: Align data on shared timestamps before computing spread
+        # Align data on shared timestamps before computing spread
         df_a = pd.DataFrame({'time': rates_a['time'], 'a': rates_a['close']})
         df_b = pd.DataFrame({'time': rates_b['time'], 'b': rates_b['close']})
         df = pd.merge(df_a, df_b, on='time', how='inner')
         if len(df) < 480:
-            logger.debug(f"[{asset_a}/{asset_b}] Insufficient aligned candles ({len(df)}). Skipping.")
+            logger.warning(f"[{asset_a}/{asset_b}] Insufficient aligned candles ({len(df)}). Skipping.")
             return
 
         spread = df['a'] - df['b']
         current_spread = float(spread.iloc[-1])
 
-        # Zero-Shot Forecast
+        # Zero-Shot Forecast.
+        # Wrapped in run_in_executor: pipeline.predict() is a blocking PyTorch call
+        # (~15–60s on CPU). Running it on the event loop would freeze all async
+        # scheduling, preventing signal consumption and SIGINT handling.
+        # functools.partial is required because run_in_executor cannot pass keyword args.
         context = torch.tensor(spread.values, dtype=torch.float32)
-        forecast = self.pipeline.predict(context, prediction_length=10)
+        predict_fn = functools.partial(self.pipeline.predict, context, prediction_length=10)
+        forecast = await loop.run_in_executor(None, predict_fn)
         # forecast shape: (batch=1, quantiles, prediction_length) — take median quantile
         n_quantiles = forecast.shape[1]
         median_idx = n_quantiles // 2
@@ -771,32 +1194,64 @@ class AlphaEngine:
 
         pair_key = (asset_a, asset_b)
 
-        # ── C2 FIX: EXIT LOGIC ─────────────────────────────────────────────────
+        # ── EXIT LOGIC ─────────────────────────────────────────────────────────
         if pair_key in self.active_pairs:
             basket = self.active_pairs[pair_key]
             age_hours = (time.time() - basket["entry_time"]) / 3600.0
-            spread_delta = abs(future_spread - current_spread)
-            spread_converged = spread_delta < abs(current_spread * EXIT_THRESHOLD)
             time_stop = age_hours >= MAX_BASKET_AGE_H
+
+            # Correct mean-reversion exit: has spread reverted toward zero from entry?
+            # predicted_reversion = fraction of entry spread magnitude the model predicts
+            # will have unwound.  Positive = converging.  Exit when ≥ EXIT_THRESHOLD.
+            # Recovery case (entry_spread=0.0): entry unknown — rely on time-stop only.
+            entry_spread = basket["entry_spread"]
+            if abs(entry_spread) > 1e-9:
+                predicted_reversion = (abs(entry_spread) - abs(future_spread)) / abs(entry_spread)
+                spread_converged = predicted_reversion >= EXIT_THRESHOLD
+            else:
+                spread_converged = False
+
+            logger.info(
+                f"[{asset_a}/{asset_b}] BASKET OPEN | age={age_hours:.1f}h | "
+                f"entry={entry_spread:.5f} | current={current_spread:.5f} | "
+                f"future={future_spread:.5f} | "
+                f"reversion={'N/A' if abs(entry_spread) <= 1e-9 else f'{predicted_reversion:.1%}'} | "
+                f"time_stop={time_stop}"
+            )
 
             if spread_converged or time_stop:
                 reason = "TIME_STOP" if time_stop else "MEAN_REVERSION"
-                logger.info(f"[{asset_a}/{asset_b}] EXIT signal — reason: {reason} | age: {age_hours:.1f}h")
+                logger.info(
+                    f"[{asset_a}/{asset_b}] EXIT → {reason} | "
+                    f"age={age_hours:.1f}h | entry={entry_spread:.5f} | future={future_spread:.5f}"
+                )
                 sig_a = Signal(symbol=asset_a, action="CLOSE", basket_id=basket["basket_id"], role="PRIMARY")
                 sig_b = Signal(symbol=asset_b, action="CLOSE", basket_id=basket["basket_id"], role="HEDGE")
                 await self.queue.put(sig_a)
                 await self.queue.put(sig_b)
                 del self.active_pairs[pair_key]
-            return  # Don't attempt entry while a basket is open
+            return  # Never attempt fresh entry while an existing basket is open
 
         # ── ENTRY LOGIC ────────────────────────────────────────────────────────
-        # Check Risk Gates
-        info_a = mt5.symbol_info(asset_a)
+        # symbol_info awaited via run_in_executor; both legs checked for spread gates
+        info_a = await loop.run_in_executor(None, mt5.symbol_info, asset_a)
+        info_b = await loop.run_in_executor(None, mt5.symbol_info, asset_b)
+
         if info_a and risk_gates.is_spread_blown(asset_a, info_a.spread):
-            logger.warning(f"Spread blown on {asset_a}. Vetoing signal.")
+            logger.warning(f"[{asset_a}/{asset_b}] Variance spread blown on {asset_a}. Vetoing.")
+            return
+        if info_b and risk_gates.is_spread_blown(asset_b, info_b.spread):
+            logger.warning(f"[{asset_a}/{asset_b}] Variance spread blown on {asset_b}. Vetoing.")
+            return
+        if info_a and risk_gates.is_spread_absolute_blown(asset_a, info_a.spread):
+            logger.warning(f"[{asset_a}/{asset_b}] Absolute spread limit exceeded on {asset_a}. Vetoing.")
+            return
+        if info_b and risk_gates.is_spread_absolute_blown(asset_b, info_b.spread):
+            logger.warning(f"[{asset_a}/{asset_b}] Absolute spread limit exceeded on {asset_b}. Vetoing.")
             return
 
         action_a = action_b = None
+        divergence = 0.0
         if current_spread != 0:
             divergence = (future_spread - current_spread) / abs(current_spread)
             if divergence > SIGNAL_THRESHOLD:
@@ -811,25 +1266,49 @@ class AlphaEngine:
             await self.queue.put(sig_a)
             await self.queue.put(sig_b)
 
-            # C1 FIX: Register basket so we never re-enter
+            # Register basket immediately to prevent re-entry on next tick
             self.active_pairs[pair_key] = {
                 "basket_id": b_id,
                 "entry_spread": current_spread,
                 "entry_time": time.time()
             }
-            logger.info(f"AI Signal Generated: {b_id} | {action_a} {asset_a} & {action_b} {asset_b}")
+            logger.info(
+                f"🚀 [{asset_a}/{asset_b}] SIGNAL → {action_a}/{action_b} | "
+                f"basket={b_id} | spread={current_spread:.5f} | divergence={divergence:.4%}"
+            )
+        else:
+            # Every evaluation now logged at INFO so the engine is never silent
+            logger.info(
+                f"[{asset_a}/{asset_b}] No signal | "
+                f"current={current_spread:.5f} | future={future_spread:.5f} | "
+                f"divergence={divergence:.4%} (threshold ±{SIGNAL_THRESHOLD:.1%})"
+            )
 </file>
 
 <file path="omega_v2/core/execution_router.py">
 import asyncio
 import logging
 import MetaTrader5 as mt5
+from config import settings
 
 logger = logging.getLogger("ExecutionRouter")
 
 class ExecutionRouter:
     def __init__(self, signal_queue: asyncio.Queue):
         self.queue = signal_queue
+
+        # ── Session-level risk state ────────────────────────────────────────────
+        # Captured on first account_info call; used for drawdown gate.
+        self._session_equity_start: float | None = None
+
+        # Counts consecutive losing baskets. Reset to 0 on any winning basket.
+        # Only incremented once per basket (on the HEDGE leg close).
+        self._consecutive_losses: int = 0
+
+        # Stores the account equity snapshot taken at the start of each basket
+        # close sequence (PRIMARY leg). Consumed when the HEDGE leg settles.
+        # Key: basket_id str — value: equity float
+        self._pre_close_equity: dict = {}
 
     async def run(self):
         """Listens for AI signals and executes them."""
@@ -844,15 +1323,46 @@ class ExecutionRouter:
                 self.queue.task_done()
 
     async def _execute(self, sig):
-        loop = asyncio.get_running_loop()  # H2 FIX: use get_running_loop()
+        loop = asyncio.get_running_loop()
 
         # 1. C4 FIX: Guard account_info against None (MT5 disconnect)
         account_info = await loop.run_in_executor(None, mt5.account_info)
         if account_info is None:
             logger.error("MT5 account_info returned None — connection lost. Skipping order.")
             return
+
+        # Capture session equity baseline on first successful call
+        if self._session_equity_start is None:
+            self._session_equity_start = account_info.equity
+            logger.info(f"[Risk] Session equity baseline set: {self._session_equity_start:.2f}")
+
+        # ── Session drawdown gate ───────────────────────────────────────────────
+        # Applies to ALL actions (entries AND exits) — a blown session must halt everything
+        # except the user can still ManualClose via MT5 terminal.
+        session_dd = (self._session_equity_start - account_info.equity) / self._session_equity_start
+        if session_dd >= settings.MAX_SESSION_DRAWDOWN:
+            logger.critical(
+                f"[Risk] SESSION DRAWDOWN LIMIT BREACHED: {session_dd:.2%} >= "
+                f"{settings.MAX_SESSION_DRAWDOWN:.2%} ({account_info.equity:.2f} equity). "
+                f"All orders rejected."
+            )
+            return
+
+        # ── Consecutive losses gate ─────────────────────────────────────────────
+        # Only blocks new ENTRIES. CLOSE signals always pass through so existing
+        # positions can still be exited cleanly.
+        if sig.action != "CLOSE" and self._consecutive_losses >= settings.MAX_CONSECUTIVE_LOSSES:
+            logger.critical(
+                f"[Risk] {self._consecutive_losses} consecutive losing baskets. "
+                f"New entries blocked until manual reset or a winning basket."
+            )
+            return
+
+        # ── Margin floor ────────────────────────────────────────────────────────
         if account_info.margin_free < 200.0:
-            logger.critical(f"Margin Collapse Imminent ({account_info.margin_free:.2f} free). Rejecting order.")
+            logger.critical(
+                f"[Risk] Margin floor breached ({account_info.margin_free:.2f} free). Rejecting order."
+            )
             return
 
         # 2. Symbol visibility check
@@ -861,8 +1371,10 @@ class ExecutionRouter:
             logger.error(f"{sig.symbol} not visible in Market Watch.")
             return
 
-        # 3. CLOSE action — find and close existing positions for this basket
+        # 3. CLOSE action — snapshot equity on PRIMARY so we can measure basket PnL on HEDGE
         if sig.action == "CLOSE":
+            if getattr(sig, 'role', '') == "PRIMARY":
+                self._pre_close_equity[sig.basket_id] = account_info.equity
             await self._close_positions(sig, loop)
             return
 
@@ -877,70 +1389,125 @@ class ExecutionRouter:
         price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
 
         # Dynamic volume using Kelly fraction from account equity
-        from config import settings
-        kelly_volume = round(max(0.01, account_info.equity * settings.KELLY_MAX / 100_000), 2)
+        kelly_volume = float(round(max(0.01, account_info.equity * settings.KELLY_MAX / 100_000), 2))
 
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": sig.symbol,
-            "volume": kelly_volume,
-            "type": order_type,
-            "price": price,
-            "deviation": 10,
-            "magic": 999,
-            "comment": sig.basket_id,
-            "type_time": mt5.ORDER_TIME_GTC,
+        # STRICT TYPE CASTING: MT5's C-extension rejects numpy types and raises
+        # (-2, 'Unnamed arguments not allowed'). Every field must be a native
+        # Python type. comment is clipped to MT5's hard 31-char limit.
+        # Lambda wrapper bypasses the asyncio executor argument-unpacking bug
+        # where passing a dict positionally fails on some MT5/Windows versions.
+        req = {
+            "action":       mt5.TRADE_ACTION_DEAL,
+            "symbol":       str(sig.symbol),
+            "volume":       float(kelly_volume),
+            "type":         int(order_type),
+            "price":        float(price),
+            "deviation":    int(10),
+            "magic":        int(999),
+            "comment":      str(sig.basket_id)[:31],
+            "type_time":    mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
-
-        result = await loop.run_in_executor(None, mt5.order_send, request)
+        def _send(): return mt5.order_send(req)
+        result = await loop.run_in_executor(None, _send)
         if result is None:
             logger.error(f"order_send returned None for {sig.symbol} — {mt5.last_error()}")
         elif result.retcode != mt5.TRADE_RETCODE_DONE:
             logger.error(f"Order failed for {sig.symbol}: {result.comment} [retcode={result.retcode}]")
         else:
-            logger.info(f"Order executed: {sig.symbol} {sig.action} | {kelly_volume} lots @ {price}")
+            logger.info(f"✅ Order executed: {sig.symbol} {sig.action} | {kelly_volume} lots @ {price}")
 
     async def _close_positions(self, sig, loop):
-        """Close all open positions for the given symbol belonging to this basket."""
+        """Close all open positions for the given symbol belonging to this basket.
+
+        BUG-V2-04 FIX:
+          - Primary filter: comment == basket_id AND magic == 999
+          - Fallback filter: magic == 999 ONLY (NOT all positions on symbol)
+            The original code fell back to closing ALL positions on the symbol if the
+            comment was stripped by the broker. On a live account this would close
+            positions opened by other strategies or manual trades.
+        """
         positions = await loop.run_in_executor(None, mt5.positions_get, sig.symbol)
         if not positions:
             logger.warning(f"[CLOSE] No open positions found for {sig.symbol}.")
             return
 
-        # Filter to only positions belonging to this basket
-        basket_positions = [p for p in positions if p.comment == sig.basket_id]
+        # Primary: exact basket comment + our magic number
+        basket_positions = [p for p in positions if p.comment == sig.basket_id and p.magic == 999]
         if not basket_positions:
-            # Fall back: close all positions on this symbol if basket comment not found
-            basket_positions = list(positions)
+            # Fallback: only our magic number — never touch foreign positions
+            basket_positions = [p for p in positions if p.magic == 999]
+            if not basket_positions:
+                logger.error(
+                    f"[CLOSE] No positions with magic=999 found for {sig.symbol} "
+                    f"(basket: {sig.basket_id}). Aborting close."
+                )
+                return
+            logger.warning(
+                f"[CLOSE] Basket comment not matched for {sig.symbol}. "
+                f"Falling back to {len(basket_positions)} magic=999 position(s)."
+            )
 
+        closed_count = 0
         for pos in basket_positions:
             close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
             tick = await loop.run_in_executor(None, mt5.symbol_info_tick, sig.symbol)
             if tick is None:
-                logger.error(f"[CLOSE] Could not fetch tick for {sig.symbol}.")
+                logger.error(f"[CLOSE] Could not fetch tick for {sig.symbol}. Skipping ticket {pos.ticket}.")
                 continue
             price = tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask
 
-            close_request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": sig.symbol,
-                "volume": pos.volume,
-                "type": close_type,
-                "position": pos.ticket,
-                "price": price,
-                "deviation": 10,
-                "magic": 999,
-                "comment": f"close_{sig.basket_id}",
-                "type_time": mt5.ORDER_TIME_GTC,
+            # Same strict casting + lambda wrapper as entry orders.
+            # f"close_{sig.basket_id}" can exceed 31 chars — clip it.
+            close_req = {
+                "action":       mt5.TRADE_ACTION_DEAL,
+                "symbol":       str(sig.symbol),
+                "volume":       float(pos.volume),
+                "type":         int(close_type),
+                "position":     int(pos.ticket),
+                "price":        float(price),
+                "deviation":    int(10),
+                "magic":        int(999),
+                "comment":      f"close_{sig.basket_id}"[:31],
+                "type_time":    mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
-            result = await loop.run_in_executor(None, mt5.order_send, close_request)
+            def _close(): return mt5.order_send(close_req)
+            result = await loop.run_in_executor(None, _close)
             if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
                 err = result.comment if result else mt5.last_error()
                 logger.error(f"[CLOSE] Failed to close {sig.symbol} ticket {pos.ticket}: {err}")
             else:
                 logger.info(f"[CLOSE] Closed {sig.symbol} ticket {pos.ticket} @ {price}")
+                closed_count += 1
+
+        # ── Consecutive loss tracking ────────────────────────────────────────────
+        # Only runs on the HEDGE leg (last signal in the basket close sequence).
+        # At this point both PRIMARY and HEDGE legs have been closed, so the full
+        # basket PnL is reflected in account equity.
+        if closed_count > 0 and getattr(sig, 'role', '') == "HEDGE":
+            pre_equity = self._pre_close_equity.pop(sig.basket_id, None)
+            if pre_equity is not None:
+                post_info = await loop.run_in_executor(None, mt5.account_info)
+                if post_info is not None:
+                    pnl = post_info.equity - pre_equity
+                    if pnl < 0:
+                        self._consecutive_losses += 1
+                        logger.warning(
+                            f"[Risk] Basket {sig.basket_id} — LOSS: {pnl:.2f}. "
+                            f"Consecutive losses: {self._consecutive_losses}/{settings.MAX_CONSECUTIVE_LOSSES}"
+                        )
+                    else:
+                        self._consecutive_losses = 0
+                        logger.info(
+                            f"[Risk] Basket {sig.basket_id} — WIN: +{pnl:.2f}. "
+                            f"Consecutive loss counter reset to 0."
+                        )
+            else:
+                logger.debug(
+                    f"[Risk] No pre-close equity snapshot for basket {sig.basket_id}. "
+                    f"PnL tracking skipped (likely recovered from crash)."
+                )
 </file>
 
 </files>
