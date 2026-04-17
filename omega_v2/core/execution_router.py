@@ -101,28 +101,33 @@ class ExecutionRouter:
         price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
 
         # Dynamic volume using Kelly fraction from account equity
-        kelly_volume = round(max(0.01, account_info.equity * settings.KELLY_MAX / 100_000), 2)
+        kelly_volume = float(round(max(0.01, account_info.equity * settings.KELLY_MAX / 100_000), 2))
 
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": sig.symbol,
-            "volume": kelly_volume,
-            "type": order_type,
-            "price": price,
-            "deviation": 10,
-            "magic": 999,
-            "comment": sig.basket_id,
-            "type_time": mt5.ORDER_TIME_GTC,
+        # STRICT TYPE CASTING: MT5's C-extension rejects numpy types and raises
+        # (-2, 'Unnamed arguments not allowed'). Every field must be a native
+        # Python type. comment is clipped to MT5's hard 31-char limit.
+        # Lambda wrapper bypasses the asyncio executor argument-unpacking bug
+        # where passing a dict positionally fails on some MT5/Windows versions.
+        req = {
+            "action":       mt5.TRADE_ACTION_DEAL,
+            "symbol":       str(sig.symbol),
+            "volume":       float(kelly_volume),
+            "type":         int(order_type),
+            "price":        float(price),
+            "deviation":    int(10),
+            "magic":        int(999),
+            "comment":      str(sig.basket_id)[:31],
+            "type_time":    mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
-
-        result = await loop.run_in_executor(None, mt5.order_send, request)
+        def _send(): return mt5.order_send(req)
+        result = await loop.run_in_executor(None, _send)
         if result is None:
             logger.error(f"order_send returned None for {sig.symbol} — {mt5.last_error()}")
         elif result.retcode != mt5.TRADE_RETCODE_DONE:
             logger.error(f"Order failed for {sig.symbol}: {result.comment} [retcode={result.retcode}]")
         else:
-            logger.info(f"Order executed: {sig.symbol} {sig.action} | {kelly_volume} lots @ {price}")
+            logger.info(f"✅ Order executed: {sig.symbol} {sig.action} | {kelly_volume} lots @ {price}")
 
     async def _close_positions(self, sig, loop):
         """Close all open positions for the given symbol belonging to this basket.
@@ -164,20 +169,23 @@ class ExecutionRouter:
                 continue
             price = tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask
 
-            close_request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": sig.symbol,
-                "volume": pos.volume,
-                "type": close_type,
-                "position": pos.ticket,
-                "price": price,
-                "deviation": 10,
-                "magic": 999,
-                "comment": f"close_{sig.basket_id}",
-                "type_time": mt5.ORDER_TIME_GTC,
+            # Same strict casting + lambda wrapper as entry orders.
+            # f"close_{sig.basket_id}" can exceed 31 chars — clip it.
+            close_req = {
+                "action":       mt5.TRADE_ACTION_DEAL,
+                "symbol":       str(sig.symbol),
+                "volume":       float(pos.volume),
+                "type":         int(close_type),
+                "position":     int(pos.ticket),
+                "price":        float(price),
+                "deviation":    int(10),
+                "magic":        int(999),
+                "comment":      f"close_{sig.basket_id}"[:31],
+                "type_time":    mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
-            result = await loop.run_in_executor(None, mt5.order_send, close_request)
+            def _close(): return mt5.order_send(close_req)
+            result = await loop.run_in_executor(None, _close)
             if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
                 err = result.comment if result else mt5.last_error()
                 logger.error(f"[CLOSE] Failed to close {sig.symbol} ticket {pos.ticket}: {err}")

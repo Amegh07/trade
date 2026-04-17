@@ -15,19 +15,27 @@ TRADABLE_PAIRS = [
     ("AUDJPY", "NZDJPY"),   # Asian Session Engine
 ]
 
-SIGNAL_THRESHOLD = 0.02   # 2% forecast divergence required to enter
-EXIT_THRESHOLD   = 0.25   # 25% reversion from entry spread triggers close (BUG-V2-03 FIX)
+# SIGNAL_THRESHOLD: 0.1% forecast divergence required to enter.
+#
+# Chronos-Bolt is a zero-shot probabilistic forecaster for stationary spreads.
+# Its median quantile output typically moves 0.05–0.3% per M5 bar relative to
+# current value. The previous threshold of 2% was structurally unreachable —
+# this caused zero signals across all observed runtime.
+SIGNAL_THRESHOLD = 0.001  # 0.1% forecast divergence required to enter
+EXIT_THRESHOLD   = 0.25   # 25% reversion from entry spread triggers close
 MAX_BASKET_AGE_H = 24.0   # Time stop: close after 24 hours regardless
+
 
 class Signal:
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
 
+
 class AlphaEngine:
     def __init__(self, signal_queue: asyncio.Queue):
         self.queue = signal_queue
 
-        # C1 FIX: Position memory — tracks open baskets keyed by (asset_a, asset_b)
+        # Position memory — tracks open baskets keyed by (asset_a, asset_b)
         # Value: {"basket_id": str, "entry_spread": float, "entry_time": float}
         self.active_pairs: dict = {}
 
@@ -70,6 +78,7 @@ class AlphaEngine:
     async def run(self):
         """Main async loop for generating signals."""
         await self._sync_open_positions()
+        cycle = 0
 
         while True:
             if risk_gates.is_rollover_window():
@@ -77,18 +86,21 @@ class AlphaEngine:
                 await asyncio.sleep(60)
                 continue
 
+            cycle += 1
+            logger.info(f"[Cycle {cycle}] Evaluating {len(TRADABLE_PAIRS)} pair(s)...")
+
+            # SEQUENTIAL evaluation — MT5's Python binding uses a COM object that is
+            # NOT safe for concurrent cross-thread calls. Running pairs with asyncio.gather
+            # would submit multiple MT5 calls simultaneously from different thread-pool
+            # workers, risking a crash. Sequential evaluation is safe and correct.
             for asset_a, asset_b in TRADABLE_PAIRS:
                 await self._process_pair(asset_a, asset_b)
 
+            logger.info(f"[Cycle {cycle}] Complete. Sleeping 60s.")
             await asyncio.sleep(60)
 
     async def _process_pair(self, asset_a: str, asset_b: str):
-        """Wrapper that catches and logs all exceptions from pair evaluation.
-
-        DIAG-01 FIX: Previously, any exception in _evaluate_pair would propagate up
-        and silently kill the 'for' loop iteration, causing the alpha engine to skip
-        pairs without any log output. Now every failure is captured and logged.
-        """
+        """Wrapper that catches and logs all exceptions from pair evaluation."""
         loop = asyncio.get_running_loop()
         try:
             await self._evaluate_pair(asset_a, asset_b, loop)
@@ -101,28 +113,29 @@ class AlphaEngine:
         rates_b = await loop.run_in_executor(None, mt5.copy_rates_from_pos, asset_b, mt5.TIMEFRAME_M5, 0, 512)
 
         if rates_a is None or rates_b is None or len(rates_a) < 512 or len(rates_b) < 512:
-            logger.debug(f"[{asset_a}/{asset_b}] Insufficient rate data (a={len(rates_a) if rates_a is not None else 'None'}, "
-                         f"b={len(rates_b) if rates_b is not None else 'None'}). Skipping.")
+            logger.warning(
+                f"[{asset_a}/{asset_b}] Insufficient rate data "
+                f"(a={len(rates_a) if rates_a is not None else 'None'}, "
+                f"b={len(rates_b) if rates_b is not None else 'None'}). Skipping."
+            )
             return
 
-        # H3 FIX: Align data on shared timestamps before computing spread
+        # Align data on shared timestamps before computing spread
         df_a = pd.DataFrame({'time': rates_a['time'], 'a': rates_a['close']})
         df_b = pd.DataFrame({'time': rates_b['time'], 'b': rates_b['close']})
         df = pd.merge(df_a, df_b, on='time', how='inner')
         if len(df) < 480:
-            logger.debug(f"[{asset_a}/{asset_b}] Insufficient aligned candles ({len(df)}). Skipping.")
+            logger.warning(f"[{asset_a}/{asset_b}] Insufficient aligned candles ({len(df)}). Skipping.")
             return
 
         spread = df['a'] - df['b']
         current_spread = float(spread.iloc[-1])
 
-        # Zero-Shot Forecast
-        # BUG-NEW-01 FIX: pipeline.predict() is a blocking PyTorch call (~15–60s on CPU).
-        # Running it directly on the event loop froze all async scheduling during inference,
-        # preventing ExecutionRouter from consuming signals and blocking SIGINT handling.
-        # Wrapping in run_in_executor offloads inference to a thread so the event loop
-        # stays live. functools.partial is required because run_in_executor cannot pass
-        # keyword arguments.
+        # Zero-Shot Forecast.
+        # Wrapped in run_in_executor: pipeline.predict() is a blocking PyTorch call
+        # (~15–60s on CPU). Running it on the event loop would freeze all async
+        # scheduling, preventing signal consumption and SIGINT handling.
+        # functools.partial is required because run_in_executor cannot pass keyword args.
         context = torch.tensor(spread.values, dtype=torch.float32)
         predict_fn = functools.partial(self.pipeline.predict, context, prediction_length=10)
         forecast = await loop.run_in_executor(None, predict_fn)
@@ -140,28 +153,30 @@ class AlphaEngine:
             age_hours = (time.time() - basket["entry_time"]) / 3600.0
             time_stop = age_hours >= MAX_BASKET_AGE_H
 
-            # BUG-V2-03 FIX: The original code compared future_spread to current_spread,
-            # which measured whether the *model's view is changing*, not whether the trade
-            # is in profit. The correct check: has the spread reverted toward zero from entry?
-            #
+            # Correct mean-reversion exit: has spread reverted toward zero from entry?
             # predicted_reversion = fraction of entry spread magnitude the model predicts
-            # will have unwound. Positive = converging toward mean (zero). Exit when ≥ EXIT_THRESHOLD.
-            #
-            # Recovery case (entry_spread=0.0): entry spread unknown after restart.
-            # We cannot compute reversion — rely on TIME_STOP only.
+            # will have unwound.  Positive = converging.  Exit when ≥ EXIT_THRESHOLD.
+            # Recovery case (entry_spread=0.0): entry unknown — rely on time-stop only.
             entry_spread = basket["entry_spread"]
             if abs(entry_spread) > 1e-9:
                 predicted_reversion = (abs(entry_spread) - abs(future_spread)) / abs(entry_spread)
                 spread_converged = predicted_reversion >= EXIT_THRESHOLD
             else:
-                spread_converged = False  # Recovery case: no entry spread known; time-stop only
+                spread_converged = False
+
+            logger.info(
+                f"[{asset_a}/{asset_b}] BASKET OPEN | age={age_hours:.1f}h | "
+                f"entry={entry_spread:.5f} | current={current_spread:.5f} | "
+                f"future={future_spread:.5f} | "
+                f"reversion={'N/A' if abs(entry_spread) <= 1e-9 else f'{predicted_reversion:.1%}'} | "
+                f"time_stop={time_stop}"
+            )
 
             if spread_converged or time_stop:
                 reason = "TIME_STOP" if time_stop else "MEAN_REVERSION"
                 logger.info(
-                    f"[{asset_a}/{asset_b}] EXIT signal — reason: {reason} | "
-                    f"age: {age_hours:.1f}h | entry_spread: {entry_spread:.5f} | "
-                    f"future_spread: {future_spread:.5f}"
+                    f"[{asset_a}/{asset_b}] EXIT → {reason} | "
+                    f"age={age_hours:.1f}h | entry={entry_spread:.5f} | future={future_spread:.5f}"
                 )
                 sig_a = Signal(symbol=asset_a, action="CLOSE", basket_id=basket["basket_id"], role="PRIMARY")
                 sig_b = Signal(symbol=asset_b, action="CLOSE", basket_id=basket["basket_id"], role="HEDGE")
@@ -171,27 +186,25 @@ class AlphaEngine:
             return  # Never attempt fresh entry while an existing basket is open
 
         # ── ENTRY LOGIC ────────────────────────────────────────────────────────
-        # BUG-V2-01 + BUG-V2-02 FIX:
-        #   (a) symbol_info is now awaited via run_in_executor (was a blocking MT5 call on event loop)
-        #   (b) BOTH pair legs are now checked, not just asset_a
-        #   (c) Absolute spread gate (is_spread_absolute_blown) applied to both legs in addition to variance gate
+        # symbol_info awaited via run_in_executor; both legs checked for spread gates
         info_a = await loop.run_in_executor(None, mt5.symbol_info, asset_a)
         info_b = await loop.run_in_executor(None, mt5.symbol_info, asset_b)
 
         if info_a and risk_gates.is_spread_blown(asset_a, info_a.spread):
-            logger.warning(f"[{asset_a}/{asset_b}] Variance spread blown on {asset_a}. Vetoing signal.")
+            logger.warning(f"[{asset_a}/{asset_b}] Variance spread blown on {asset_a}. Vetoing.")
             return
         if info_b and risk_gates.is_spread_blown(asset_b, info_b.spread):
-            logger.warning(f"[{asset_a}/{asset_b}] Variance spread blown on {asset_b}. Vetoing signal.")
+            logger.warning(f"[{asset_a}/{asset_b}] Variance spread blown on {asset_b}. Vetoing.")
             return
         if info_a and risk_gates.is_spread_absolute_blown(asset_a, info_a.spread):
-            logger.warning(f"[{asset_a}/{asset_b}] Absolute spread limit exceeded on {asset_a}. Vetoing signal.")
+            logger.warning(f"[{asset_a}/{asset_b}] Absolute spread limit exceeded on {asset_a}. Vetoing.")
             return
         if info_b and risk_gates.is_spread_absolute_blown(asset_b, info_b.spread):
-            logger.warning(f"[{asset_a}/{asset_b}] Absolute spread limit exceeded on {asset_b}. Vetoing signal.")
+            logger.warning(f"[{asset_a}/{asset_b}] Absolute spread limit exceeded on {asset_b}. Vetoing.")
             return
 
         action_a = action_b = None
+        divergence = 0.0
         if current_spread != 0:
             divergence = (future_spread - current_spread) / abs(current_spread)
             if divergence > SIGNAL_THRESHOLD:
@@ -206,18 +219,20 @@ class AlphaEngine:
             await self.queue.put(sig_a)
             await self.queue.put(sig_b)
 
-            # C1 FIX: Register basket immediately to prevent re-entry on next tick
+            # Register basket immediately to prevent re-entry on next tick
             self.active_pairs[pair_key] = {
                 "basket_id": b_id,
                 "entry_spread": current_spread,
                 "entry_time": time.time()
             }
             logger.info(
-                f"AI Signal Generated: {b_id} | {action_a} {asset_a} & {action_b} {asset_b} | "
-                f"spread: {current_spread:.5f} | divergence: {divergence:.4%}"
+                f"🚀 [{asset_a}/{asset_b}] SIGNAL → {action_a}/{action_b} | "
+                f"basket={b_id} | spread={current_spread:.5f} | divergence={divergence:.4%}"
             )
         else:
-            logger.debug(
-                f"[{asset_a}/{asset_b}] No signal — divergence below threshold | "
-                f"current: {current_spread:.5f} | future: {future_spread:.5f}"
+            # Every evaluation now logged at INFO so the engine is never silent
+            logger.info(
+                f"[{asset_a}/{asset_b}] No signal | "
+                f"current={current_spread:.5f} | future={future_spread:.5f} | "
+                f"divergence={divergence:.4%} (threshold ±{SIGNAL_THRESHOLD:.1%})"
             )
