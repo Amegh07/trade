@@ -13,27 +13,36 @@ class RiskGates:
         ]}
 
     def is_rollover_window(self) -> bool:
-        """Blocks trading during the 23:55 to 00:05 NY time liquidity vacuum."""
+        """Blocks trading during the 23:55–00:05 NY time liquidity vacuum."""
         now = datetime.datetime.now(NY_TZ)
         return (now.hour == settings.ROLLOVER_START_HOUR and now.minute >= 55) or \
                (now.hour == settings.ROLLOVER_END_HOUR and now.minute <= 5)
 
     def is_spread_blown(self, symbol: str, current_spread: float) -> bool:
-        """Vetoes the trade if the current spread is 5x the recent moving average."""
+        """Vetoes the trade if the current spread is SPREAD_VARIANCE_MAX× the recent moving average."""
         hist = self.spread_history.get(symbol)
         if hist is None:
             return False
-            
+
         if len(hist) < 10:
             hist.append(current_spread)
             return False
-            
+
         hist.append(current_spread)
         avg = np.mean(list(hist))
         if avg == 0:
             return False
-            
+
         ratio = current_spread / avg
         return ratio > settings.SPREAD_VARIANCE_MAX
+
+    def is_spread_absolute_blown(self, symbol: str, current_spread: float) -> bool:
+        """Vetoes the trade if the current spread exceeds the MAX_ALLOWED_SPREAD hard limit in points.
+
+        This is a separate, unconditional gate from the variance-based check.
+        It fires immediately with no history required, protecting against news-spike spreads
+        that haven't yet skewed the rolling average.
+        """
+        return current_spread > settings.MAX_ALLOWED_SPREAD
 
 risk_gates = RiskGates()
